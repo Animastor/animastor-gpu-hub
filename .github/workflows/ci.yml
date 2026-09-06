@@ -1,0 +1,115 @@
+# GPU Hub standalone CI (Phase 10J) — verification only, NO publishing.
+#
+# This workflow proves the standalone repo is self-verifying:
+#   job 1  package   — npm ci + standalone suite (19 checks) + npm pack --dry-run
+#   job 2  docker    — image build + isolated smoke (health, auth planes,
+#                      protocol gates, artifact 404 tokens) + protocol parity
+#
+# Publishing (npm / GHCR) is deliberately NOT wired here. It is a separate,
+# explicit decision recorded in the monorepo audit docs
+# (docs/architecture/PHASE_10J_GPU_HUB_CUTOVER_PREPARATION_AUDIT.md —
+# monorepo side). Do not add push steps without that decision.
+
+name: gpu-hub-ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package tests + pack surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm ci (registry resolution of @animastor/contracts)
+        run: npm ci
+
+      - name: standalone suite (package smoke, dependency isolation,
+              canonical contracts, protocol parity, 14-route freeze,
+              Redis ownership)
+        run: node tests/run-all.cjs
+
+      - name: npm pack --dry-run (frozen 9-file surface)
+        run: npm pack --dry-run
+
+  docker:
+    name: docker build + smoke + protocol parity
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t gpu-hub-ci:${{ github.sha }} .
+
+      - name: Smoke (isolated redis:7 network)
+        run: |
+          set -euo pipefail
+          docker network create hub-ci >/dev/null
+          docker run -d --name hub-ci-redis --network hub-ci redis:7 >/dev/null
+          docker run -d --name hub-ci \
+            --network hub-ci \
+            -e REDIS_URL=redis://hub-ci-redis:6379 \
+            -e GPU_HUB_API_KEY=ci-test-key \
+            gpu-hub-ci:${{ github.sha }} >/dev/null
+          sleep 3
+
+          fail() { echo "SMOKE FAIL: $1" >&2; exit 1; }
+
+          # 1. health
+          curl -fsS http://127.0.0.1:0 >/dev/null 2>&1 || true
+          docker run --rm --network hub-ci curlimages/curl:8.8.0 -fsS \
+            http://hub-ci:5000/health | grep -q '"ok":true' \
+            || fail "health"
+
+          # 2. API key planes (fail-closed)
+          CODE=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s -o /dev/null -w '%{http_code}' \
+            -X POST http://hub-ci:5000/task -H 'Content-Type: application/json' -d '{}')
+          [ "$CODE" = "401" ] || fail "no-key /task expected 401, got $CODE"
+          CODE=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s -o /dev/null -w '%{http_code}' \
+            -X POST http://hub-ci:5000/task -H 'Content-Type: application/json' -H 'x-api-key: wrong' -d '{}')
+          [ "$CODE" = "401" ] || fail "bad-key /task expected 401, got $CODE"
+
+          # 3. protocol gate (v1 envelope → 409 protocol_version_mismatch)
+          BODY=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s \
+            -X POST http://hub-ci:5000/task -H 'Content-Type: application/json' -H 'x-api-key: ci-test-key' \
+            -d '{"protocol_version":1}')
+          echo "$BODY" | grep -q 'protocol_version_mismatch' || fail "protocol gate, got: $BODY"
+
+          # 4. artifact routes without mounts → frozen 404 tokens
+          TOKEN=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s \
+            http://hub-ci:5000/worker-bundle)
+          echo "$TOKEN" | grep -q 'worker_bundle_unavailable' || fail "worker-bundle 404 token, got: $TOKEN"
+          TOKEN=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s \
+            http://hub-ci:5000/installer)
+          echo "$TOKEN" | grep -q 'installer_unavailable' || fail "installer 404 token, got: $TOKEN"
+          CODE=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s -o /dev/null -w '%{http_code}' \
+            http://hub-ci:5000/workflow/does-not-exist)
+          [ "$CODE" = "404" ] || fail "workflow 404, got $CODE"
+
+          # 5. unauth worker endpoints
+          CODE=$(docker run --rm --network hub-ci curlimages/curl:8.8.0 -s -o /dev/null -w '%{http_code}' \
+            "http://hub-ci:5000/task/next?worker=w&type=image")
+          [ "$CODE" = "401" ] || fail "unauth /task/next expected 401, got $CODE"
+
+      - name: Protocol parity inside the container (PROTOCOL_VERSION === 2)
+        run: |
+          V=$(docker exec hub-ci node -e "console.log(require('@animastor/contracts').jobProtocolV2.PROTOCOL_VERSION)")
+          [ "$V" = "2" ] || { echo "PARITY FAIL: container PROTOCOL_VERSION=$V" >&2; exit 1; }
+          echo "container PROTOCOL_VERSION=$V — parity OK"
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker rm -f hub-ci hub-ci-redis >/dev/null 2>&1 || true
+          docker network rm hub-ci >/dev/null 2>&1 || true
