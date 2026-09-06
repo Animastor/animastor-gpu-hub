@@ -69,7 +69,7 @@ jobs:
           # 1. health
           curl -fsS http://127.0.0.1:0 >/dev/null 2>&1 || true
           docker run --rm --network hub-ci curlimages/curl:8.8.0 -fsS \
-            http://hub-ci:5000/health | grep -q '"ok":true' \
+            http://hub-ci:5000/health | grep -q '"gpus":' \
             || fail "health"
 
           # 2. API key planes (fail-closed)

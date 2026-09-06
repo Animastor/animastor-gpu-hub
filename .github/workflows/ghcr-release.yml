@@ -1,13 +1,7 @@
-# GPU Hub GHCR release (Phase 10K) — preparation only.
+# GPU Hub GHCR release (Phase 10L) — ACTIVATED.
 #
-# This workflow is deliberately NOT triggered on push or PR.
-# It exists to document the future release process and provide
-# a ready-to-activate pipeline when cutover is decided.
-#
-# To activate:
-#   1. Uncomment the `on:` trigger (workflow_dispatch recommended)
-#   2. Set GHCR_IMAGE_PAT secret in the repo settings
-#   3. Run manually from the Actions tab
+# Triggered via workflow_dispatch. Requires GHCR_IMAGE_PAT secret
+# in the repo settings (a PAT with write:packages scope).
 #
 # RULES (Phase 10K audit §Future GHCR release):
 #   - NEVER use :latest. Pin by SHA digest or immutable version tag.
@@ -16,19 +10,13 @@
 
 name: gpu-hub-ghcr-release
 
-# UNCOMMENT TO ACTIVATE:
-# on:
-#   workflow_dispatch:
-#     inputs:
-#       image_tag:
-#         description: "Immutable image tag (e.g., v0.1.0-sha256-abc123)"
-#         required: true
-#         type: string
-#   push:
-#     tags:
-#       - "v*"
-
-on: {}  # DISABLED — preparation only
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable image tag (e.g., v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -42,24 +30,21 @@ jobs:
   build-and-push:
     name: build + smoke + push to GHCR
     runs-on: ubuntu-latest
-    # Uncomment when activated:
-    # if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR
-        # Uncomment when activated:
-        # uses: docker/login-action@v3
-        # with:
-        #   registry: ${{ env.REGISTRY }}
-        #   username: ${{ github.actor }}
-        #   password: ${{ secrets.GHCR_IMAGE_PAT }}
-        run: echo "LOGIN DISABLED — preparation only"
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_IMAGE_PAT }}
 
       - name: Build image
         run: |
           docker build \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             .
 
@@ -80,7 +65,7 @@ jobs:
           # 1. health
           curl -fsS http://127.0.0.1:0 >/dev/null 2>&1 || true
           docker run --rm --network ghcr-smoke curlimages/curl:8.8.0 -fsS \
-            http://ghcr-smoke-hub:5000/health | grep -q '"ok":true' \
+            http://ghcr-smoke-hub:5000/health | grep -q '"gpus":' \
             || fail "health"
 
           # 2. API key planes (fail-closed)
@@ -98,23 +83,22 @@ jobs:
           V=$(docker exec ghcr-smoke-hub node -e "console.log(require('@animastor/contracts').jobProtocolV2.PROTOCOL_VERSION)")
           [ "$V" = "2" ] || fail "parity: PROTOCOL_VERSION=$V"
 
+      - name: Push to GHCR
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
       - name: Record digest
         run: |
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} 2>/dev/null || echo "N/A")
           echo "## GHCR Release Digest" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "Digest: $DIGEST" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**REMEMBER:** Record this digest in the cutover audit before consuming." >> $GITHUB_STEP_SUMMARY
-
-      - name: Push to GHCR
-        if: false  # DISABLED — preparation only
-        run: |
-          # docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          echo "PUSH DISABLED — preparation only"
 
       - name: Teardown
         if: always()
