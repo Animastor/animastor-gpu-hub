@@ -9,11 +9,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Animastor/animastor.git",
-    "directory": "gpu-hub"
+    "url": "git+https://github.com/Animastor/animastor-gpu-hub.git"
   },
   "bugs": {
-    "url": "https://github.com/Animastor/animastor/issues"
+    "url": "https://github.com/Animastor/animastor-gpu-hub/issues"
   },
   "files": [
     "gpu-hub.js",
