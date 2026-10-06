@@ -1,6 +1,6 @@
 // GPU Hub entrypoint. gpu-hub.js exports a testable buildHubApp factory;
 // this file wires the real Redis client + env config and starts the server.
-const { buildHubApp } = require('./gpu-hub');
+const { buildHubApp, artifactDirEnvConfig } = require('./gpu-hub');
 
 const REDIS_URL = process.env.REDIS_URL || "redis://animastor-redis:6379";
 const redis = new (require("ioredis"))(REDIS_URL);
@@ -9,6 +9,12 @@ const { PORT = 5000 } = process.env;
 const app = buildHubApp({
   redis,
   config: {
+    // Artifact directory overrides (WORKER_BUNDLE_DIR, WORKFLOW_DIR,
+    // INSTALLER_SRC_DIR, INSTALLER_MANIFESTS_DIR, INSTALLER_WORKFLOWS_DIR,
+    // INSTALLER_PKG_DIR) — previously NOT forwarded here, so the documented
+    // config-override branch of resolveArtifactDir() was dead code in a
+    // shipped container. Empty/absent env stays absent (defaults apply).
+    ...artifactDirEnvConfig(),
     BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
     GPU_TIMEOUT_MS: Number(process.env.GPU_TIMEOUT_MS ?? process.env.GPU_TIMEOUT ?? 600000),
     GPU_HUB_API_KEY: process.env.GPU_HUB_API_KEY || null,

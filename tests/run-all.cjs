@@ -19,6 +19,8 @@
  *   5. route freeze        — EXACT frozen 14-route HTTP surface
  *   6. Redis ownership     — hub-owned constants frozen; backend-owned
  *                            animastor:worker-auth never written by the hub
+ *   7. artifact resolution — env overrides reach config, live mount beats
+ *                            baked-in, configured-but-missing fails loudly
  */
 
 const fs = require('fs');
@@ -71,7 +73,7 @@ function readSource(p) {
 
 // ── 1. package smoke ─────────────────────────────────────────────────────
 
-console.log('\n[1/6] package smoke');
+console.log('\n[1/7] package smoke');
 
 check('package identity is @animastor/gpu-hub@0.1.0', () => {
   const pkg = readPkg();
@@ -116,7 +118,7 @@ check('buildHubApp factory constructs with a stub Redis (no eager connections)',
 
 // ── 2. dependency isolation ──────────────────────────────────────────────
 
-console.log('\n[2/6] dependency isolation');
+console.log('\n[2/7] dependency isolation');
 
 check('runtime files never require monorepo code (backend/worker/frontend/parent escapes)', () => {
   const banned = /require\(\s*['"][^'"]*(backend\/src|backend\/ai|worker\/worker|frontends|\.\.\/)+/;
@@ -158,7 +160,7 @@ check('hub sources stay pg/postgres-free', () => {
 
 // ── 3. canonical contracts import ────────────────────────────────────────
 
-console.log('\n[3/6] canonical contracts import');
+console.log('\n[3/7] canonical contracts import');
 
 check('gpu-hub.js consumes @animastor/contracts (the single protocol source)', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -178,7 +180,7 @@ check('@animastor/contracts resolves inside the package tree (registry or provid
 
 // ── 4. protocol parity ───────────────────────────────────────────────────
 
-console.log('\n[4/6] protocol parity');
+console.log('\n[4/7] protocol parity');
 
 check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', () => {
   const hub = require(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -189,7 +191,7 @@ check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', ()
 
 // ── 5. route freeze ──────────────────────────────────────────────────────
 
-console.log('\n[5/6] route freeze');
+console.log('\n[5/7] route freeze');
 
 check('route surface is EXACTLY the frozen 14-route set (additions and removals both fail)', () => {
   const FROZEN_ROUTES = [
@@ -216,7 +218,7 @@ check('deprecated /worker-source backward-compat markers intact', () => {
 
 // ── 6. Redis ownership ───────────────────────────────────────────────────
 
-console.log('\n[6/6] Redis ownership');
+console.log('\n[6/7] Redis ownership');
 
 check('hub-owned key constants keep their frozen values', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -242,6 +244,71 @@ check('hub still reads the mirror + SYNC anchors intact (frozen worker-auth debt
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
   for (const anchor of ['WORKER_AUTH_MIRROR_KEY', 'hget(WORKER_AUTH_MIRROR_KEY', 'SYNC: backend/src/services/worker-auth.js']) {
     assert(src.includes(anchor), `SYNC anchor missing: ${anchor}`);
+  }
+});
+
+// ── 7. artifact directory resolution (Phase 10T precedence fix) ───────────
+
+console.log('\n[7/7] artifact directory resolution');
+
+function stubRedis() {
+  const noop = () => {};
+  return { get: noop, set: noop, del: noop, hget: noop, hset: noop, llen: noop, keys: noop, expire: noop, hdel: noop, lpush: noop, rpush: noop, lrem: noop, lrange: noop, hgetall: noop, smembers: noop, sadd: noop, srem: noop, incr: noop, ttl: noop, pexpire: noop, multi: () => ({ exec: noop, llen: noop, lpush: noop, hset: noop, expire: noop }) };
+}
+
+check('artifactDirEnvConfig forwards only non-empty artifact dir env keys', () => {
+  const { artifactDirEnvConfig } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const out = artifactDirEnvConfig({
+    WORKFLOW_DIR: ' /tmp/workflows ',
+    INSTALLER_SRC_DIR: '',
+    UNRELATED_KEY: '/tmp/x',
+  });
+  assert(out.WORKFLOW_DIR === '/tmp/workflows', `trimmed value expected, got ${JSON.stringify(out.WORKFLOW_DIR)}`);
+  assert(!('INSTALLER_SRC_DIR' in out), 'empty env must stay absent (defaults apply)');
+  assert(!('UNRELATED_KEY' in out), 'non-artifact keys must not leak into config');
+});
+
+check('explicit config override wins over every other source', () => {
+  const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'gpu-hub-artifacts-'));
+  try {
+    const app = buildHubApp({ redis: stubRedis(), config: { WORKFLOW_DIR: tmp }, intervals: false });
+    assert(app.__hub.artifactDirs.WORKFLOW_DIR === tmp,
+      `config override ignored: ${app.__hub.artifactDirs.WORKFLOW_DIR}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+check('configured-but-missing artifact dir fails loudly (no silent fallback)', () => {
+  const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const missing = path.join(require('os').tmpdir(), 'gpu-hub-definitely-missing-dir');
+  let threw = null;
+  try {
+    buildHubApp({ redis: stubRedis(), config: { WORKFLOW_DIR: missing }, intervals: false });
+  } catch (err) { threw = err; }
+  assert(threw, 'buildHubApp must refuse to start for a missing configured dir');
+  assert(String(threw.message).includes('WORKFLOW_DIR'), `wrong error: ${threw.message}`);
+});
+
+check('live mount target beats baked-in artifacts/ (precedence fix)', () => {
+  const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const bakedWorkflows = path.join(PKG_ROOT, 'artifacts', 'workflows');
+  const mounted = fs.existsSync('/app/workflows'); // inside a container with a real mount
+  fs.mkdirSync(bakedWorkflows, { recursive: true });
+  try {
+    const app = buildHubApp({ redis: stubRedis(), config: {}, intervals: false });
+    const chosen = app.__hub.artifactDirs.WORKFLOW_DIR;
+    if (mounted) {
+      assert(chosen === '/app/workflows', `mount must win over baked-in, got ${chosen}`);
+    } else {
+      assert(chosen === bakedWorkflows,
+        `baked-in must be used only when nothing is mounted, got ${chosen}`);
+    }
+    assert(app.__hub.artifactDirs.WORKER_BUNDLE_DIR === '/app/worker-bundle',
+      'missing mount + missing baked-in must fall back to the frozen target (404 contract)');
+  } finally {
+    fs.rmSync(path.join(PKG_ROOT, 'artifacts'), { recursive: true, force: true });
   }
 });
 

@@ -191,6 +191,32 @@ async function requireWorkerCredential(redis, req, res) {
 const WORKSPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ======================================================
+// ARTIFACT DIR ENV → CONFIG FORWARDING
+// ======================================================
+// server.js used to build `config` by hand and silently dropped these keys,
+// which made the config-override branch of resolveArtifactDir() unreachable
+// inside a shipped container (verified: WORKER_BUNDLE_DIR=... changed
+// nothing). Both entrypoints spread this helper into `config` so an explicit
+// env override is always honored (and fails loudly when it points nowhere).
+const ARTIFACT_DIR_ENV_KEYS = [
+  "WORKER_BUNDLE_DIR",
+  "WORKFLOW_DIR",
+  "INSTALLER_SRC_DIR",
+  "INSTALLER_MANIFESTS_DIR",
+  "INSTALLER_WORKFLOWS_DIR",
+  "INSTALLER_PKG_DIR",
+];
+
+function artifactDirEnvConfig(env = process.env) {
+  const out = {};
+  for (const key of ARTIFACT_DIR_ENV_KEYS) {
+    const value = env[key];
+    if (typeof value === "string" && value.trim()) out[key] = value.trim();
+  }
+  return out;
+}
+
+// ======================================================
 // HUB APP FACTORY (testable; server.js starts it)
 // ======================================================
 
@@ -1325,13 +1351,78 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   //   GET /installer              installer package (tar.gz, self-contained)
   //   GET /installer/sha256       installer checksum + version metadata
 
-  const WORKER_BUNDLE_DIR = config.WORKER_BUNDLE_DIR || "/app/worker-bundle";
-  const WORKFLOW_DIR = config.WORKFLOW_DIR || "/app/workflows";
-  const INSTALLER_SRC_DIR = config.INSTALLER_SRC_DIR || "/app/installer-src";
+  // ======================================================
+  // ARTIFACT DIRECTORY RESOLUTION (Phase 10T precedence fix)
+  // ======================================================
+  // Order:
+  //   1. explicit config/env override — MUST be a readable directory,
+  //      otherwise startup fails LOUDLY (never a silent fallback);
+  //   2. live bind mount at the frozen /app/... target — a mounted local
+  //      source always beats the baked-in copy;
+  //   3. baked-in /app/artifacts/<name> — only when nothing is mounted
+  //      (images built with artifact bake-in keep working standalone);
+  //   4. the frozen mount target — routes then answer the frozen 404
+  //      tokens (DEPLOYMENT.md), never a stale baked-in artifact.
+  // The previous shipped order was config > baked-in > mount, which
+  // silently ignored local dev mounts (mounted installer 0.1.0 was served
+  // as baked-in 1.3.0, mounted worker 2.1.1 as baked-in 2.1.0).
+  const ARTIFACT_BASE = path.join(__dirname, "artifacts");
+
+  function resolveArtifactDir(configKey, mountFallback, bakedInName) {
+    let chosen;
+    let source;
+    const configured = config[configKey];
+    if (configured) {
+      let isDir = false;
+      try { isDir = fs.statSync(configured).isDirectory(); } catch (_) {}
+      if (!isDir) {
+        throw new Error(
+          `${configKey}="${configured}" is not a readable directory — ` +
+          "refusing to start instead of silently serving baked-in/mount artifacts"
+        );
+      }
+      chosen = configured;
+      source = "config";
+    } else if (fs.existsSync(mountFallback)) {
+      chosen = mountFallback;
+      source = "mount";
+    } else if (bakedInName && fs.existsSync(path.join(ARTIFACT_BASE, bakedInName))) {
+      chosen = path.join(ARTIFACT_BASE, bakedInName);
+      source = "baked-in";
+    } else {
+      chosen = mountFallback;
+      source = "missing → frozen 404";
+    }
+    console.log(`[ARTIFACTS] ${configKey} = ${chosen} (${source})`);
+    return chosen;
+  }
+
+  const WORKER_BUNDLE_DIR =
+    resolveArtifactDir("WORKER_BUNDLE_DIR", "/app/worker-bundle", "worker-bundle");
+  const WORKFLOW_DIR =
+    resolveArtifactDir("WORKFLOW_DIR", "/app/workflows", "workflows");
+  const INSTALLER_SRC_DIR =
+    resolveArtifactDir("INSTALLER_SRC_DIR", "/app/installer-src", "installer-src");
   const INSTALLER_MANIFESTS_DIR =
-    config.INSTALLER_MANIFESTS_DIR || "/app/install-manifests";
+    resolveArtifactDir("INSTALLER_MANIFESTS_DIR", "/app/install-manifests", "install-manifests");
   const INSTALLER_WORKFLOWS_DIR =
-    config.INSTALLER_WORKFLOWS_DIR || "/app/workflows";
+    resolveArtifactDir("INSTALLER_WORKFLOWS_DIR", "/app/workflows", "workflows");
+  // Canonical installer VERSION source (the package root). Separate mount:
+  // the flat installer-src mount carries no package.json (the bake-in
+  // Dockerfile flattens the canonical package.json into installer-src/), and
+  // a file bind-mount nested inside the read-only installer-src dir mount is
+  // rejected by runc — so the package root is mounted beside it instead.
+  const INSTALLER_PKG_DIR =
+    resolveArtifactDir("INSTALLER_PKG_DIR", "/app/installer-pkg", null);
+
+  const artifactDirs = {
+    WORKER_BUNDLE_DIR,
+    WORKFLOW_DIR,
+    INSTALLER_SRC_DIR,
+    INSTALLER_MANIFESTS_DIR,
+    INSTALLER_WORKFLOWS_DIR,
+    INSTALLER_PKG_DIR,
+  };
 
   // Versions have ONE canonical source each (no manual duplication):
   //   worker bundle → worker/worker/package.json (mounted as WORKER_BUNDLE_DIR)
@@ -1356,7 +1447,12 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   }
 
   function installerMeta() {
-    const canonical = readCanonicalVersion(INSTALLER_SRC_DIR, "animastor-installer");
+    // Version source: the canonical package root when it is mounted
+    // (INSTALLER_PKG_DIR), else the package.json inside INSTALLER_SRC_DIR
+    // (bake-in layout / deployments that keep it in the flat mount).
+    const canonical =
+      readCanonicalVersion(INSTALLER_PKG_DIR, "animastor-installer") ||
+      readCanonicalVersion(INSTALLER_SRC_DIR, "animastor-installer");
     return {
       version: config.INSTALLER_VERSION || (canonical && canonical.version) || null,
       name: (canonical && canonical.name) || "animastor-installer",
@@ -1973,6 +2069,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     redis,
     sweepProcessingOrphans,
     heartbeatAndTimeoutSweep,
+    artifactDirs,
     stopIntervals: () => { if (intervalTimer) clearInterval(intervalTimer); },
   };
 
@@ -1991,6 +2088,7 @@ if (require.main === module) {
   const app = buildHubApp({
     redis,
     config: {
+      ...artifactDirEnvConfig(),
       BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
       GPU_TIMEOUT_MS: Number(process.env.GPU_TIMEOUT_MS ?? process.env.GPU_TIMEOUT ?? 600000),
       GPU_HUB_API_KEY: process.env.GPU_HUB_API_KEY || null,
@@ -2030,6 +2128,8 @@ module.exports = {
   authenticateWorkerMirror,
   requireWorkerCredential,
   buildHubApp,
+  // Artifact dir env forwarding (server.js config seam)
+  artifactDirEnvConfig,
   // SH-1 test/ops surface (worker sharing V1)
   sanitizeSharePolicy,
   activeSharePolicy,
