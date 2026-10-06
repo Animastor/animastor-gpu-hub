@@ -142,6 +142,13 @@ jobs:
           docker exec ghcr-smoke-hub node /app/scripts/smoke-artifacts.cjs \
             || fail "artifact lock assertions (worker/workflow/installer)"
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_IMAGE_PAT }}
+
       - name: Push to GHCR
         run: |
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
