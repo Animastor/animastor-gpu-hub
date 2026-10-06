@@ -1,12 +1,21 @@
 # GPU Hub GHCR release (Phase 10L) — ACTIVATED.
 #
-# Triggered via workflow_dispatch. Requires GHCR_IMAGE_PAT secret
-# in the repo settings (a PAT with write:packages scope).
+# Reproducible post-split release pipeline:
+#   checkout hub → pinned source checkouts (artifacts.lock.json) →
+#   stage + verify artifacts (FAIL on any mismatch) → docker build →
+#   smoke (protocol/auth gates + artifact gates against the LOCK) →
+#   push → record digest + content digest.
+#
+# The image is built ONLY from this repository plus the immutable commits
+# pinned in artifacts.lock.json — never from a floating branch and never from
+# a local monorepo checkout. A missing/stale artifact FAILS the run instead of
+# shipping a silent baked-in fallback.
 #
 # RULES (Phase 10K audit §Future GHCR release):
 #   - NEVER use :latest. Pin by SHA digest or immutable version tag.
 #   - Record the digest in the cutover audit before consuming.
-#   - The image must be sha256-identical to the monorepo gpu-hub/ fixture.
+#   - Bumping an artifacts.lock.json pin is a reviewed code change
+#     (node scripts/stage-artifacts.cjs --write-lock --worker ... --backend ...).
 
 name: gpu-hub-ghcr-release
 
@@ -34,19 +43,60 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Read pinned artifact sources
+        id: pins
+        run: |
+          PINS=$(node -e '
+            const l = JSON.parse(require("fs").readFileSync("artifacts.lock.json", "utf8"));
+            const out = [];
+            for (const [k, v] of Object.entries(l.sources)) {
+              out.push(`${k}_repository=${v.repository}`);
+              out.push(`${k}_commit=${v.commit}`);
+            }
+            for (const [k, v] of Object.entries(l.artifacts)) {
+              out.push(`version_${k.replaceAll("-", "_")}=${v.version || ""}`);
+              out.push(`tree_${k.replaceAll("-", "_")}=${v.sha256_tree}`);
+            }
+            console.log(out.join("\n"));
+          ')
+          echo "$PINS"
+          echo "$PINS" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned worker source
+        uses: actions/checkout@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_IMAGE_PAT }}
+          repository: ${{ steps.pins.outputs.worker_repository }}
+          ref: ${{ steps.pins.outputs.worker_commit }}
+          path: _sources/worker
+
+      - name: Checkout pinned backend source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pins.outputs.backend_repository }}
+          ref: ${{ steps.pins.outputs.backend_commit }}
+          path: _sources/backend
+
+      - name: Stage artifacts + verify against lock (FAIL on mismatch)
+        run: node scripts/stage-artifacts.cjs --worker _sources/worker --backend _sources/backend
 
       - name: Build image
         run: |
+          EPOCH=$(git log -1 --format=%ct)
           docker build \
+            --build-arg SOURCE_DATE_EPOCH=$EPOCH \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             .
+
+      - name: Record image content digest (reproducibility evidence)
+        run: |
+          docker run --rm --entrypoint node \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            /app/scripts/content-hash.cjs | tee content-hash.txt
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo 'image content digest (files + sha256 of /app):' >> $GITHUB_STEP_SUMMARY
+          echo '`'"$(cat content-hash.txt)"'`' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Smoke test (isolated redis:7 network)
         run: |
@@ -63,7 +113,6 @@ jobs:
           fail() { echo "SMOKE FAIL: $1" >&2; exit 1; }
 
           # 1. health
-          curl -fsS http://127.0.0.1:0 >/dev/null 2>&1 || true
           docker run --rm --network ghcr-smoke curlimages/curl:8.8.0 -fsS \
             http://ghcr-smoke-hub:5000/health | grep -q '"gpus":' \
             || fail "health"
@@ -83,6 +132,16 @@ jobs:
           V=$(docker exec ghcr-smoke-hub node -e "console.log(require('@animastor/contracts').jobProtocolV2.PROTOCOL_VERSION)")
           [ "$V" = "2" ] || fail "parity: PROTOCOL_VERSION=$V"
 
+          # 5. baked resolution path (no mounts in this container)
+          LOGS=$(docker logs ghcr-smoke-hub 2>&1)
+          BAKED=$(echo "$LOGS" | grep -c '(baked-in)' || true)
+          [ "$BAKED" -ge 5 ] || fail "expected >=5 [ARTIFACTS] (baked-in) resolutions, got $BAKED"
+          if echo "$LOGS" | grep -q '(mount)'; then fail "unexpected (mount) resolution without mounts"; fi
+
+          # 6. served artifacts must equal artifacts.lock.json (anti silent-fallback)
+          docker exec ghcr-smoke-hub node /app/scripts/smoke-artifacts.cjs \
+            || fail "artifact lock assertions (worker/workflow/installer)"
+
       - name: Push to GHCR
         run: |
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
@@ -96,6 +155,7 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "Digest: $DIGEST" >> $GITHUB_STEP_SUMMARY
+          echo "Content: $(cat content-hash.txt)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**REMEMBER:** Record this digest in the cutover audit before consuming." >> $GITHUB_STEP_SUMMARY
