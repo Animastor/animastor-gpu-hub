@@ -89,3 +89,36 @@ services:
 | Redis | single `REDIS_URL` instance; hub-owned key families (`animastor:gpu-hub:workers`, queue/running/heartbeat/dead-letter); reads (never writes) the backend-owned `animastor:worker-auth` mirror |
 | Backend callbacks | `POST ${BACKEND_URL}/gpu/task/result` and `/gpu/task/error` (Job Protocol v2 envelopes, 5 retries × 500 ms, error fallback key TTL 1 h) |
 | Public exposure | never expose the hub directly to the internet; always behind the authenticated nginx `/gpu/` prefix + `GPU_HUB_API_KEY` |
+
+## 4. Reproducible release build (post-split artifact sources)
+
+Release images are built by `.github/workflows/ghcr-release.yml` from
+**pinned sources only** — never from a floating branch and never from a local
+checkout of another repository. `artifacts.lock.json` pins each group to an
+immutable `{repository, commit}` plus its `version` and `sha256_tree`:
+
+| # | Artifact group | Canonical source (post-split) |
+|---|---|---|
+| 1 | `worker-bundle` | `Animastor/animastor-worker` @ pinned commit → `packages/animastor-worker/worker` (version = its `package.json`) |
+| 2 | `workflows` | `Animastor/animastor-backend` @ pinned commit → `backend/ai/workflows` |
+| 3 | `installer-src` | `Animastor/animastor-backend` @ pinned commit → `packages/animastor-installer/src/installer` + root `package.json` (flattened, version = `0.1.0`) |
+| 4 | `install-manifests` | `Animastor/animastor-backend` @ pinned commit → `packages/animastor-installer/ai/install-manifests` |
+
+Pipeline: `scripts/stage-artifacts.cjs` verifies every source checkout is AT
+the pinned commit, stages a fresh `artifacts/`, and recomputes each
+`sha256_tree` — **any mismatch exits non-zero and the release FAILS**, so a
+stale or missing artifact can never be baked in silently → `docker build`
+(`npm ci` from `package-lock.json`) → smoke tests, including
+`scripts/smoke-artifacts.cjs`, which asserts the RUNNING hub serves exactly
+the locked versions/bytes → push → the immutable digest **and** the content
+digest (`scripts/content-hash.cjs`, `<files> <sha256>` of `/app`) are recorded.
+
+`artifacts/` and `_sources/` are staging-only and gitignored: the pins plus
+verification are the contract, not the bytes. Bumping a pin is a reviewed
+commit produced by
+`node scripts/stage-artifacts.cjs --write-lock --worker <checkout> --backend <checkout>`.
+
+Image **digests** are not reproducible across builds (layer tar mtimes and
+image config timestamps come from build time), so reproducibility is asserted
+on content: two independent clean builds must produce the same content digest
+from `scripts/content-hash.cjs`.
