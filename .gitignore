@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 
+# Artifact staging — fetched from the pinned sources in artifacts.lock.json
+# by scripts/stage-artifacts.cjs (CI and local release builds). Never commit
+# staged binaries: the pins + verification are the contract, not the bytes.
+artifacts/
+_sources/
+
 # npm pack output
 *.tgz
 
