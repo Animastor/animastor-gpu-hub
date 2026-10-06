@@ -293,8 +293,14 @@ check('configured-but-missing artifact dir fails loudly (no silent fallback)', (
 
 check('live mount target beats baked-in artifacts/ (precedence fix)', () => {
   const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
-  const bakedWorkflows = path.join(PKG_ROOT, 'artifacts', 'workflows');
+  const artifactsDir = path.join(PKG_ROOT, 'artifacts');
+  const bakedWorkflows = path.join(artifactsDir, 'workflows');
   const mounted = fs.existsSync('/app/workflows'); // inside a container with a real mount
+  // Self-contained slate: a staged release tree (gitignored, produced by
+  // scripts/stage-artifacts.cjs) may exist here — drop it and rebuild ONLY
+  // the workflows group so both branches below are deterministic. If you
+  // were preparing an image, re-stage after running the suite.
+  fs.rmSync(artifactsDir, { recursive: true, force: true });
   fs.mkdirSync(bakedWorkflows, { recursive: true });
   try {
     const app = buildHubApp({ redis: stubRedis(), config: {}, intervals: false });
@@ -308,7 +314,7 @@ check('live mount target beats baked-in artifacts/ (precedence fix)', () => {
     assert(app.__hub.artifactDirs.WORKER_BUNDLE_DIR === '/app/worker-bundle',
       'missing mount + missing baked-in must fall back to the frozen target (404 contract)');
   } finally {
-    fs.rmSync(path.join(PKG_ROOT, 'artifacts'), { recursive: true, force: true });
+    fs.rmSync(artifactsDir, { recursive: true, force: true });
   }
 });
 
