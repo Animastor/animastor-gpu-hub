@@ -1,8 +1,8 @@
 node_modules
 tests
+_sources
 .git
 *.md
 !README.md
 Dockerfile
 .dockerignore
-package-lock.json
