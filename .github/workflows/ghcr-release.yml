@@ -82,8 +82,23 @@ jobs:
       - name: Build image
         run: |
           EPOCH=$(git log -1 --format=%ct)
+
+          # Pin every mtime of the build context to the commit: COPY keeps the
+          # source file mtimes, so a checkout at run time would otherwise bake
+          # the wall clock into layers 10/12 and change the index digest on
+          # every run (verified: same content, different digest).
+          find . -path './.git' -prune -o -mindepth 1 -exec touch -h -d "@$EPOCH" {} +
+
+          # --provenance=false: the BuildKit provenance/attestation manifest
+          # embeds the tag name and the wall-clock build time, so it makes the
+          # pushed index digest differ on every run even when all layers and
+          # the image config are bit-identical (verified: two clean builds at
+          # one commit produce identical layer diff_ids + identical config,
+          # and with this flag an identical index digest too). SOURCE_DATE_EPOCH
+          # pins the config `created` field and normalizes layer mtimes.
           docker build \
             --build-arg SOURCE_DATE_EPOCH=$EPOCH \
+            --provenance=false \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             .

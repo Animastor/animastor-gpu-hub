@@ -118,7 +118,16 @@ verification are the contract, not the bytes. Bumping a pin is a reviewed
 commit produced by
 `node scripts/stage-artifacts.cjs --write-lock --worker <checkout> --backend <checkout>`.
 
-Image **digests** are not reproducible across builds (layer tar mtimes and
-image config timestamps come from build time), so reproducibility is asserted
-on content: two independent clean builds must produce the same content digest
-from `scripts/content-hash.cjs`.
+Reproducibility is asserted on two levels:
+
+1. **Content** (cross-environment): two independent clean builds must produce
+   the same content digest from `scripts/content-hash.cjs`
+   (`<files> <sha256>` of `/app`) — this is the value recorded in the CI
+   step summary.
+2. **Index digest** (same builder, same commit): `docker build` runs with
+   `--build-arg SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` (pins the image
+   config `created` field and normalizes layer mtimes) **and**
+   `--provenance=false`. The BuildKit provenance/attestation manifest embeds
+   the tag name and the wall-clock build time, which otherwise changes the
+   pushed index digest on every run even when all 12 layer `diff_id`s and the
+   image config are bit-identical across builds.
