@@ -107,8 +107,8 @@ immutable `{repository, commit}` plus its `version` and `sha256_tree`:
 Pipeline: `scripts/stage-artifacts.cjs` verifies every source checkout is AT
 the pinned commit, stages a fresh `artifacts/`, and recomputes each
 `sha256_tree` — **any mismatch exits non-zero and the release FAILS**, so a
-stale or missing artifact can never be baked in silently → `docker build`
-(`npm ci` from `package-lock.json`) → smoke tests, including
+stale or missing artifact can never be baked in silently → reproducible
+`docker buildx build` (`npm ci` from `package-lock.json`) → smoke tests, including
 `scripts/smoke-artifacts.cjs`, which asserts the RUNNING hub serves exactly
 the locked versions/bytes → push → the immutable digest **and** the content
 digest (`scripts/content-hash.cjs`, `<files> <sha256>` of `/app`) are recorded.
@@ -124,10 +124,26 @@ Reproducibility is asserted on two levels:
    the same content digest from `scripts/content-hash.cjs`
    (`<files> <sha256>` of `/app`) — this is the value recorded in the CI
    step summary.
-2. **Index digest** (same builder, same commit): `docker build` runs with
-   `--build-arg SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` (pins the image
-   config `created` field and normalizes layer mtimes) **and**
-   `--provenance=false`. The BuildKit provenance/attestation manifest embeds
-   the tag name and the wall-clock build time, which otherwise changes the
-   pushed index digest on every run even when all 12 layer `diff_id`s and the
-   image config are bit-identical across builds.
+2. **Index digest** (same commit ⇒ same digest): the release build is
+   bit-reproducible end to end. The workflow pins all of it:
+   - the base image is pinned by digest in `Dockerfile` (`node:20@sha256:…`),
+     so the base layers cannot drift with the floating tag;
+   - every build-context mtime is set to `git log -1 --format=%ct` before
+     the build, because `COPY` copies source mtimes into the layer;
+   - `SOURCE_DATE_EPOCH` (= that commit time) pins the image config
+     `created` field and drives `rewrite-timestamp=true` on the
+     `type=docker` tar output, which rewrites layer tar mtimes (including
+     the `/app` directory mtime `COPY` writes at build time) — required
+     because `rewrite-timestamp` conflicts with the daemon's `unpack` mode,
+     so the image is exported to a tar and `docker load`ed instead of
+     `--load`ed directly;
+   - `--provenance=false` drops the BuildKit attestation manifest, which
+     embeds the tag name and wall-clock build time and would otherwise
+     change the pushed index digest even for bit-identical layers;
+   - `npm ci` uses a cache dir removed in the same `RUN` (npm's `_cacache`
+     and `_logs` embed wall-clock timestamps) and every mtime it creates is
+     touched to `SOURCE_DATE_EPOCH`.
+
+   Two independent `--no-cache` builds of one commit have been verified to
+   produce identical layer `diff_id`s, an identical config digest and an
+   identical pushed registry digest.

@@ -85,23 +85,33 @@ jobs:
 
           # Pin every mtime of the build context to the commit: COPY keeps the
           # source file mtimes, so a checkout at run time would otherwise bake
-          # the wall clock into layers 10/12 and change the index digest on
+          # the wall clock into the COPY layers and change the image digest on
           # every run (verified: same content, different digest).
           find . -path './.git' -prune -o -mindepth 1 -exec touch -h -d "@$EPOCH" {} +
 
-          # --provenance=false: the BuildKit provenance/attestation manifest
-          # embeds the tag name and the wall-clock build time, so it makes the
-          # pushed index digest differ on every run even when all layers and
-          # the image config are bit-identical (verified: two clean builds at
-          # one commit produce identical layer diff_ids + identical config,
-          # and with this flag an identical index digest too). SOURCE_DATE_EPOCH
-          # pins the config `created` field and normalizes layer mtimes.
-          docker build \
+          # Reproducible image build (see DEPLOYMENT.md §4):
+          #  - SOURCE_DATE_EPOCH pins the config `created` field and gives
+          #    rewrite-timestamp its target value (layer tar mtimes, incl. the
+          #    dir mtime COPY writes at build time);
+          #  - --provenance=false drops the BuildKit attestation manifest,
+          #    which embeds the tag name and wall-clock build time and would
+          #    change the pushed index digest even for bit-identical layers;
+          #  - output goes to a tar that is then `docker load`ed: the
+          #    rewrite-timestamp exporter option conflicts with the daemon's
+          #    unpack mode, so --load cannot be used directly.
+          # Verified: two independent `--no-cache` builds of one commit yield
+          # the same layer diff_ids, the same config digest and the same
+          # pushed registry digest.
+          docker buildx build \
+            --no-cache \
             --build-arg SOURCE_DATE_EPOCH=$EPOCH \
             --provenance=false \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --output type=docker,dest=/tmp/release-image.tar,rewrite-timestamp=true,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
             .
+          docker load -i /tmp/release-image.tar
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }} \
+                     ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          rm -f /tmp/release-image.tar
 
       - name: Record image content digest (reproducibility evidence)
         run: |
