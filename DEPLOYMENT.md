@@ -142,7 +142,11 @@ Reproducibility is asserted on two levels:
      change the pushed index digest even for bit-identical layers;
    - `npm ci` uses a cache dir removed in the same `RUN` (npm's `_cacache`
      and `_logs` embed wall-clock timestamps) and every mtime it creates is
-     touched to `SOURCE_DATE_EPOCH`.
+     touched to `SOURCE_DATE_EPOCH`;
+   - the daemon must run the containerd image store: the docker driver
+     rejects the `type=docker` tar exporter otherwise (the workflow enables
+     it on GH-hosted runners before building — the same store the local
+     reproducibility proofs were built on).
 
    Two independent `--no-cache` builds of one commit have been verified to
    produce identical layer `diff_id`s, an identical config digest and an

@@ -79,6 +79,33 @@ jobs:
       - name: Stage artifacts + verify against lock (FAIL on mismatch)
         run: node scripts/stage-artifacts.cjs --worker _sources/worker --backend _sources/backend
 
+      # The build exports via the `docker` exporter (`type=docker,dest=…tar`)
+      # so that `rewrite-timestamp=true` can be applied before `docker load`.
+      # The plain docker driver rejects that exporter unless the daemon runs
+      # the containerd image store ("Docker exporter is not supported for the
+      # docker driver … or turn on the containerd image store"). GH-hosted
+      # runners start with the classic overlay2 store, so switch it on first —
+      # this is also the store the local reproducibility proofs were built on,
+      # keeping the CI build environment identical to them.
+      - name: Enable containerd image store (required by the docker exporter)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then
+            sudo jq '.features = (.features // {}) | .features["containerd-snapshotter"] = true' \
+              /etc/docker/daemon.json > /tmp/daemon.json
+          else
+            printf '{"features":{"containerd-snapshotter":true}}\n' > /tmp/daemon.json
+          fi
+          sudo cp /tmp/daemon.json /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do
+            docker info >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker info | grep -F 'io.containerd.snapshotter.v1' \
+            || { echo 'containerd image store is NOT active' >&2; exit 1; }
+
       - name: Build image
         run: |
           EPOCH=$(git log -1 --format=%ct)
