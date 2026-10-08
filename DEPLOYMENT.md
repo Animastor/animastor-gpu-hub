@@ -143,10 +143,24 @@ Reproducibility is asserted on two levels:
    - `npm ci` uses a cache dir removed in the same `RUN` (npm's `_cacache`
      and `_logs` embed wall-clock timestamps) and every mtime it creates is
      touched to `SOURCE_DATE_EPOCH`;
-   - the daemon must run the containerd image store: the docker driver
-     rejects the `type=docker` tar exporter otherwise (the workflow enables
-     it on GH-hosted runners before building — the same store the local
-     reproducibility proofs were built on).
+   - the daemon runs the containerd image store on GH-hosted runners (the
+     same store the local reproducibility proofs and the load/push path use;
+     it is also what makes the `type=docker` exporter legal for the plain
+     docker driver);
+   - the BuildKit engine is pinned on both sides — CI creates a
+     docker-container builder from
+     `moby/buildkit:v0.27.1@sha256:1e110c71…` (the version the local proofs
+     ran with): different BuildKit versions serialize image history
+     differently (`EXPOSE` renders as `map[5000/tcp:{}]` vs
+     `[5000/tcp]`), which changes the config digest even for bit-identical
+     layers;
+   - every build-context file mode is normalized to 0644/0755 before the
+     build: the host umask leaks into checkout file modes (0664/0771 with
+     umask 0002 vs 0644/0755 with umask 022) and `COPY` preserves them, so
+     without this the same bytes land in different layer tars on different
+     machines (verified byte-level — mode was the only content difference
+     in the COPY layers); no tracked file carries an exec bit, so the
+     normalization is lossless for the image.
 
    Two independent `--no-cache` builds of one commit have been verified to
    produce identical layer `diff_id`s, an identical config digest and an

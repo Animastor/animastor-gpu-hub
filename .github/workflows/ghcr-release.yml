@@ -80,14 +80,13 @@ jobs:
         run: node scripts/stage-artifacts.cjs --worker _sources/worker --backend _sources/backend
 
       # The build exports via the `docker` exporter (`type=docker,dest=…tar`)
-      # so that `rewrite-timestamp=true` can be applied before `docker load`.
-      # The plain docker driver rejects that exporter unless the daemon runs
-      # the containerd image store ("Docker exporter is not supported for the
-      # docker driver … or turn on the containerd image store"). GH-hosted
-      # runners start with the classic overlay2 store, so switch it on first —
-      # this is also the store the local reproducibility proofs were built on,
-      # keeping the CI build environment identical to them.
-      - name: Enable containerd image store (required by the docker exporter)
+      # so that `rewrite-timestamp=true` can be applied before `docker load`,
+      # and the image is then pushed from the daemon. GH-hosted runners start
+      # with the classic overlay2 store; the local reproducibility proofs ran
+      # on the containerd image store, so switch it on to keep the load/push
+      # path identical (with the plain docker driver the store is also what
+      # makes the `type=docker` exporter legal at all).
+      - name: Enable containerd image store (push-path parity with local proofs)
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/docker
@@ -106,6 +105,23 @@ jobs:
           docker info | grep -F 'io.containerd.snapshotter.v1' \
             || { echo 'containerd image store is NOT active' >&2; exit 1; }
 
+      # The runner's embedded BuildKit serializes image history differently
+      # across versions (EXPOSE renders as `map[5000/tcp:{}]` vs
+      # `[5000/tcp]`), which changes the image config — and therefore the
+      # pushed digest — even for bit-identical layers (verified byte-level:
+      # CI embedded BuildKit != local v0.27.1). Pin the engine to the exact
+      # image the local reproducibility proofs were built with.
+      - name: Create pinned buildx builder (BuildKit v0.27.1)
+        run: |
+          set -euo pipefail
+          docker buildx create --name repro \
+            --driver docker-container \
+            --driver-opt image=moby/buildkit:v0.27.1@sha256:1e110c71d389d6d24f67b9438e2f7b8da749a6ff407b22a1631e025c95599368 \
+            --use
+          docker buildx inspect --bootstrap >/dev/null
+          docker buildx version
+          docker version --format 'docker server={{.Server.Version}}'
+
       - name: Build image
         run: |
           EPOCH=$(git log -1 --format=%ct)
@@ -115,6 +131,15 @@ jobs:
           # the wall clock into the COPY layers and change the image digest on
           # every run (verified: same content, different digest).
           find . -path './.git' -prune -o -mindepth 1 -exec touch -h -d "@$EPOCH" {} +
+
+          # Normalize context file modes: the host umask leaks into checkout
+          # file modes (0664/0771 with umask 0002 vs 0644/0755 with umask 022)
+          # and COPY preserves them, so the same bytes would land in different
+          # layer tars on different machines (verified byte-level: mode was
+          # the ONLY content difference in the COPY layers). No tracked file
+          # carries an exec bit, so 0644/0755 is lossless for the image.
+          find . -path './.git' -prune -o -type d -exec chmod 755 {} +
+          find . -path './.git' -prune -o -type f -exec chmod 644 {} +
 
           # Reproducible image build (see DEPLOYMENT.md §4):
           #  - SOURCE_DATE_EPOCH pins the config `created` field and gives
@@ -130,6 +155,7 @@ jobs:
           # the same layer diff_ids, the same config digest and the same
           # pushed registry digest.
           docker buildx build \
+            --builder repro \
             --no-cache \
             --build-arg SOURCE_DATE_EPOCH=$EPOCH \
             --provenance=false \
