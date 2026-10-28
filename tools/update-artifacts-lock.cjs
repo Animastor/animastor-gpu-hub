@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+// ============================================================================
+// B5 — artifacts.lock.json writer (prep plan §2.5)
+// ============================================================================
+// Computes the sha256-tree digest of the 4 GPU Hub artifact groups straight
+// from the monorepo sources (the pre-split staging inputs — byte-identical to
+// what the Dockerfile stager COPYs) and writes
+// packages/animastor-gpu-hub/artifacts.lock.json:
+//
+//   name → { source_repository, release_tag, asset_filename, version,
+//            sha256_tree }
+//
+// The digest formula is sha256 over newline-joined "<sha256(file)>  <relpath>"
+// lines (C-locale sorted, LF-terminated) — the SAME formula busybox re-computes
+// in scripts/verify-staged-artifacts.sh inside the docker build. Any byte that
+// reaches the staging tree changes its group digest → build fails (§2.3
+// checksum invariant: mismatch = fail build, BEFORE COPY --from=stager).
+//
+// Post-split ownership of this tool: the lock consumes artifacts published by
+// animastor-worker (worker-bundle) and animastor-backend (3 groups); the tool
+// itself is the HUB pin writer and moves with the hub repo (it needs read
+// access to the source trees only until release artifacts replace them —
+// after the split it is re-pointed at release asset zips, same output shape).
+//
+// Usage:
+//   node tools/update-artifacts-lock.cjs           # rewrite the lock
+//   node tools/update-artifacts-lock.cjs --check   # verify current tree
+// ============================================================================
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const HUB_DIR = __dirname; // packages/animastor-gpu-hub/tools
+const REPO_ROOT = path.resolve(HUB_DIR, '..', '..', '..');
+
+const GROUPS = [
+    {
+        name: 'worker-bundle',
+        source_repository: 'animastor-worker',
+        release_tag: 'worker-bundle-v2.1.1',
+        asset_filename: 'animastor-worker-bundle-2.1.1.zip',
+        version: '2.1.1',
+        walkRoot: path.join(REPO_ROOT, 'packages', 'animastor-worker', 'worker'),
+        excludes: ['package-lock.json'],
+    },
+    {
+        name: 'hub-workflows',
+        source_repository: 'animastor-backend',
+        release_tag: 'hub-artifacts-v1',
+        asset_filename: 'hub-workflows-v1.zip',
+        version: 'v1',
+        walkRoot: path.join(REPO_ROOT, 'backend', 'ai', 'workflows'),
+        excludes: [],
+    },
+    {
+        name: 'installer-src',
+        source_repository: 'animastor-backend',
+        release_tag: 'hub-artifacts-v1',
+        asset_filename: 'installer-src-v1.zip',
+        version: '0.1.1',
+        // NOTE: the Dockerfile stager flattens this group — src/installer/*
+        // contents land at installer-src/ root plus package.json from the
+        // package root. The digest must mirror the STAGED layout exactly.
+        walkRoot: path.join(REPO_ROOT, 'packages', 'animastor-installer', 'src', 'installer'),
+        excludes: ['package-lock.json'],
+        extraFiles: [
+            { abs: path.join(REPO_ROOT, 'packages', 'animastor-installer', 'package.json'), rel: 'package.json' },
+        ],
+    },
+    {
+        name: 'install-manifests',
+        source_repository: 'animastor-backend',
+        release_tag: 'hub-artifacts-v1',
+        asset_filename: 'install-manifests-v1.zip',
+        version: 'v1',
+        walkRoot: path.join(REPO_ROOT, 'packages', 'animastor-installer', 'ai', 'install-manifests'),
+        walkFilter: (rel) => rel.endsWith('.json'),
+        excludes: [],
+    },
+];
+
+function sha256File(p) {
+    return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+}
+
+// Canonical staged file list for a group: sorted {rel, abs} pairs that end
+// up in the staged tree (excludes + walk filter + extraFiles applied).
+// Shared by the digest below and by tools/standalone-fixture.cjs, which
+// packs the SAME list into the release zips — one source of truth.
+function groupFileList(g) {
+    const root = g.walkRoot;
+    const files = [];
+    (function walk(dir) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            const rel = path.relative(root, full).split(path.sep).join('/');
+            if (entry.isDirectory()) { walk(full); continue; }
+            if (!entry.isFile()) continue;
+            if (g.excludes.includes(entry.name) || g.excludes.includes(rel)) continue;
+            if (g.walkFilter && !g.walkFilter(rel)) continue;
+            files.push(rel);
+        }
+    })(root);
+    for (const extra of g.extraFiles || []) files.push(extra.rel);
+    files.sort();
+    return files.map((f) => ({
+        rel: f,
+        abs: (g.extraFiles || []).some((e) => e.rel === f)
+            ? (g.extraFiles || []).find((e) => e.rel === f).abs
+            : path.join(root, f),
+    }));
+}
+
+function treeDigest(g) {
+    const list = groupFileList(g);
+    const h = crypto.createHash('sha256');
+    for (const f of list) h.update(`${sha256File(f.abs)}  ${f.rel}\n`);
+    return { digest: h.digest('hex'), count: list.length };
+}
+
+function buildLock() {
+    // Carry forward published asset pins (prep plan §2.5: a released zip body
+    // never changes). Only the SOURCE-TREE digests are recomputed here — a
+    // regeneration must never silently drop a real sha256_asset pin (that
+    // would unpin the release and break --check after the first publish).
+    let prevArtifacts = {};
+    try {
+        const prevLock = JSON.parse(fs.readFileSync(path.join(HUB_DIR, '..', 'artifacts.lock.json'), 'utf8'));
+        prevArtifacts = prevLock.artifacts || {};
+    } catch (_) { /* no previous lock (first generation) */ }
+
+    const lock = {
+        _comment: 'Generated by tools/update-artifacts-lock.cjs — do not edit by hand. Digest formula: sha256 over sorted "<sha256(file)>  <relpath>\\n" lines. sha256_asset: null = the released zip is not pinned yet (POST-SPLIT, prep plan §2.5 — pinned at first release).',
+        artifacts: {},
+    };
+    for (const g of GROUPS) {
+        const { digest, count } = treeDigest(g);
+        const prev = prevArtifacts[g.name];
+        const pinned = prev
+            && prev.asset_filename === g.asset_filename
+            && /^[0-9a-f]{64}$/.test(String(prev.sha256_asset || ''))
+            ? prev.sha256_asset
+            : null;
+        lock.artifacts[g.name] = {
+            source_repository: g.source_repository,
+            release_tag: g.release_tag,
+            asset_filename: g.asset_filename,
+            // §2.1/§2.5 asset pin: sha256 of the released zip itself. It is
+            // carried forward from the committed lock once published (first
+            // release); null until then. tools/standalone-fixture.cjs fills
+            // it in for local fixtures.
+            sha256_asset: pinned,
+            version: g.version,
+            files: count,
+            sha256_tree: digest,
+        };
+    }
+    return lock;
+}
+
+module.exports = { GROUPS, groupFileList, treeDigest, sha256File, buildLock };
+
+if (require.main === module) {
+    const write = !process.argv.includes('--check');
+    const lockPath = path.join(HUB_DIR, '..', 'artifacts.lock.json');
+    const next = buildLock();
+    const serialized = JSON.stringify(next, null, 2) + '\n';
+
+    if (write) {
+        fs.writeFileSync(lockPath, serialized);
+        console.log(`artifacts.lock.json written (${lockPath})`);
+        for (const [name, a] of Object.entries(next.artifacts)) {
+            console.log(`  ${name}: files=${a.files} sha256_tree=${a.sha256_tree}`);
+        }
+    } else {
+        const current = fs.readFileSync(lockPath, 'utf8');
+        if (current !== serialized) {
+            console.error('artifacts.lock.json is OUT OF DATE vs source trees — run: node tools/update-artifacts-lock.cjs');
+            process.exit(1);
+        }
+        console.log('artifacts.lock.json is in sync with source trees');
+    }
+}

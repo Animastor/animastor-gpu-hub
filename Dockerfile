@@ -1,37 +1,103 @@
-# Base pinned by digest (a floating `node:20` would re-resolve over time and
-# break layer-identity between two builds of the same commit).
-FROM node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5
+# ── GPU Hub image — dual artifact-delivery mode ─────────────────────────────
+# Stage picker (BuildKit): ARG STAGER_STAGE selects the stager stage that
+# feeds the runtime's `COPY --from=stager`:
+#   * `stager-monorepo` — PRE-SPLIT DEFAULT. Build context is the repo root
+#     (docker-compose.yml `context: .`); the stager COPYs the 4 artifact
+#     groups out of the monorepo. This stage is dropped from the hub repo
+#     at split execution (its COPY sources do not exist there).
+#   * `stager-release` — POST-SPLIT STANDALONE. Fetches the exact GitHub
+#     Release assets named in artifacts.lock.json (prep plan §2.1/§2.2),
+#     verifies each asset's sha256 against the pin (§2.5), then runs the
+#     same sha256_tree staging gate — all BEFORE `COPY --from=stager`
+#     (§2.3 checksum invariant: mismatch = fail build, pre-COPY).
+#     Builds from the standalone animastor-gpu-hub repo root:
+#       DOCKER_BUILDKIT=1 docker build -f packages/animastor-gpu-hub/Dockerfile \
+#         --build-arg STAGER_STAGE=stager-release .
+# Requires BuildKit (docker >= 23 default): the unselected stager stage is
+# pruned from the build graph instead of being executed.
 
-# Set by the release workflow from `git log -1 --format=%ct` so that both the
-# image config `created` field and every layer mtime are pinned to the commit
-# instead of the wall clock (required for a reproducible index digest).
-ARG SOURCE_DATE_EPOCH
-# (Fall back to 0 only for ad-hoc local builds without the build-arg: the value
-# itself does not matter, only that it is constant for a given commit.)
+ARG STAGER_STAGE=stager-monorepo
+
+# ── Stage 1a: stage monorepo artifacts (PRE-SPLIT default) ──────────────────
+# Only the 4 required artifact groups are copied — no monorepo runtime code.
+# Build context is the repo root (docker-compose.yml context: .).
+# Worker bundle source: canonical packages/animastor-worker/worker/
+# (docs/architecture/WORKER_PACKAGE_RELOCATION_CHECKLIST.md).
+FROM alpine:3.19 AS stager-monorepo
+ARG WORKER_BUNDLE_SRC=packages/animastor-worker/worker
+
+# Minimal directory tree so the build never silently produces an empty image.
+RUN mkdir -p /staging/artifacts/{worker-bundle,workflows,installer-src,install-manifests}
+
+COPY ${WORKER_BUNDLE_SRC}/         /staging/artifacts/worker-bundle/
+COPY backend/ai/workflows/         /staging/artifacts/workflows/
+# Installer extraction: source lives in packages/animastor-installer/src/installer,
+# canonical version package.json at the package root. Two COPYs combine into the
+# SAME flat installer-src/ layout as before — hub code and tar prefixes unchanged.
+COPY packages/animastor-installer/src/installer/ /staging/artifacts/installer-src/
+COPY packages/animastor-installer/package.json   /staging/artifacts/installer-src/package.json
+COPY packages/animastor-installer/ai/install-manifests/ /staging/artifacts/install-manifests/
+
+# B5 integrity gate (prep plan §2.3): verify the CONTENT DIGEST of every
+# staged group against artifacts.lock.json on the staging tree — BEFORE
+# the runtime stage's `COPY --from=stager`. Mismatch fails the build here,
+# so a silently different artifact can never be baked into the image.
+# The gate is delivery-neutral (§2.0): the same check runs over whatever
+# materializes /staging/artifacts (monorepo COPYs, release zips, CI staging).
+# Digest formula is shared with tools/update-artifacts-lock.cjs.
+COPY packages/animastor-gpu-hub/artifacts.lock.json /staging/artifacts.lock.json
+COPY packages/animastor-gpu-hub/scripts/verify-staged-artifacts.sh /staging/verify-staged-artifacts.sh
+RUN sh /staging/verify-staged-artifacts.sh /staging/artifacts.lock.json /staging/artifacts
+
+# ── Stage 1b: fetch pinned release assets (POST-SPLIT standalone) ────────────
+# Zero monorepo source references: this stage must build from the standalone
+# animastor-gpu-hub repo root, where the monorepo trees do not exist.
+# Delivery contract (prep plan §2.1/§2.2): each group is one GitHub Release
+# asset referenced by its exact pinned filename; the asset's sha256 in the
+# pin file is the cryptographic anchor of the content.
+FROM alpine:3.19 AS stager-release
+ARG RELEASE_URL_BASE=https://github.com/Animastor
+RUN apk add --no-cache curl unzip
+COPY packages/animastor-gpu-hub/artifacts.lock.json /staging/artifacts.lock.json
+COPY packages/animastor-gpu-hub/scripts/verify-staged-artifacts.sh /staging/verify-staged-artifacts.sh
+COPY packages/animastor-gpu-hub/scripts/fetch-pinned-assets.sh /staging/fetch-pinned-assets.sh
+RUN sh /staging/fetch-pinned-assets.sh /staging/artifacts.lock.json /staging/artifacts "$RELEASE_URL_BASE"
+RUN sh /staging/verify-staged-artifacts.sh /staging/artifacts.lock.json /staging/artifacts
+
+# ── Stage picker ─────────────────────────────────────────────────────────────
+FROM ${STAGER_STAGE} AS stager
+
+# ── Stage 2: GPU Hub runtime ────────────────────────────────────────────────
+FROM node:20-slim
 
 WORKDIR /app
 
-# Deterministic install: exact versions from package-lock.json. (`npm install`
-# without the lock re-resolved semver ranges at build time — not reproducible.)
-# --cache /tmp/npm-cache keeps npm's _cacache + _logs (which embed wall-clock
-# timestamps in file names and index entries) OUT of the image layer; the dir
-# is removed in the same RUN so it never reaches the diff.
-# The trailing `find … touch` pins every mtime in this layer to the commit
-# (npm writes node_modules with the current time otherwise).
-COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund --cache /tmp/npm-cache \
- && rm -rf /tmp/npm-cache \
- && find /app -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
+COPY packages/animastor-gpu-hub/package.json ./
+RUN npm install --omit=dev
 
-# Runtime code + staged artifacts. artifacts/ is NOT in git: it is produced
-# BEFORE the build by scripts/stage-artifacts.cjs from the pins in
-# artifacts.lock.json (the release workflow does this). A build without
-# staging yields a mount-only image whose artifact routes answer the frozen
-# 404 tokens (DEPLOYMENT.md §1).
-#
-# The release workflow normalizes the mtimes of the build context to
-# SOURCE_DATE_EPOCH right before this build (COPY keeps source mtimes).
-COPY . .
+COPY packages/animastor-gpu-hub/gpu-hub.js packages/animastor-gpu-hub/server.js packages/animastor-gpu-hub/tarball.js packages/animastor-gpu-hub/bootstrap.js ./
+COPY packages/animastor-gpu-hub/README.md packages/animastor-gpu-hub/LICENSE ./
+
+# Pin file for the startup integrity gate: gpu-hub.js verifies the baked
+# artifacts/ copy against artifacts.lock.json (sha256_tree per group) and
+# refuses to start on any mismatch — a stale bake must never be served.
+COPY packages/animastor-gpu-hub/artifacts.lock.json ./artifacts.lock.json
+
+# Bake in the 4 artifact groups from the staging layer.
+COPY --from=stager /staging/artifacts/ /app/artifacts/
+
+# Verify the bake-in at build time — fail fast if any group is missing.
+RUN set -e; \
+    for d in worker-bundle workflows installer-src install-manifests; do \
+      [ -d "/app/artifacts/$d" ] || { echo "FATAL: /app/artifacts/$d missing"; exit 1; }; \
+    done; \
+    [ -f /app/artifacts/worker-bundle/package.json ] || \
+      { echo "FATAL: worker-bundle/package.json missing"; exit 1; }; \
+    echo "artifact bake-in verified: 4 groups present"
+
+# Integrity validator — usable via: docker exec <container> /app/scripts/check-artifacts.sh
+COPY scripts/check-artifacts.sh /app/scripts/check-artifacts.sh
+RUN chmod +x /app/scripts/check-artifacts.sh
 
 EXPOSE 5000
 

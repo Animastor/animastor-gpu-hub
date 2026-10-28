@@ -1,18 +1,22 @@
 {
   "name": "@animastor/gpu-hub",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Animastor GPU Hub — standalone HTTP orchestration boundary between the backend and GPU workers. Job queue (Redis), task dispatch/result callbacks, worker onboarding artifacts. Job Protocol v2 is consumed from the canonical @animastor/contracts package.",
   "main": "server.js",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Animastor/animastor-gpu-hub.git"
+    "url": "git+https://github.com/Animastor/animastor.git",
+    "directory": "packages/animastor-gpu-hub"
   },
   "bugs": {
-    "url": "https://github.com/Animastor/animastor-gpu-hub/issues"
+    "url": "https://github.com/Animastor/animastor/issues"
   },
   "files": [
     "gpu-hub.js",
@@ -22,7 +26,8 @@
     "Dockerfile",
     ".dockerignore",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "start": "node server.js",
