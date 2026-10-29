@@ -20,7 +20,9 @@
  *   6. Redis ownership     — hub-owned constants frozen; backend-owned
  *                            animastor:worker-auth never written by the hub
  *   7. artifact resolution — env overrides reach config, live mount beats
- *                            baked-in, configured-but-missing fails loudly
+ *                            baked-in, configured-but-missing fails loudly;
+ *                            public hub origin — canonical animastor.org
+ *                            fallback, no stale .in literal
  */
 
 const fs = require('fs');
@@ -249,7 +251,7 @@ check('hub still reads the mirror + SYNC anchors intact (frozen worker-auth debt
 
 // ── 7. artifact directory resolution (Phase 10T precedence fix) ───────────
 
-console.log('\n[7/7] artifact directory resolution');
+console.log('\n[7/7] artifact resolution + public hub origin');
 
 function stubRedis() {
   const noop = () => {};
@@ -315,6 +317,44 @@ check('live mount target beats baked-in artifacts/ (precedence fix)', () => {
       'missing mount + missing baked-in must fall back to the frozen target (404 contract)');
   } finally {
     fs.rmSync(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+check('publicHubUrl falls back to the canonical animastor.org origin', () => {
+  const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const app = buildHubApp({ redis: stubRedis(), config: {}, intervals: false });
+  assert(typeof app.__hub.publicHubUrl === 'function', 'publicHubUrl not exposed for tests');
+  assert(app.__hub.publicHubUrl() === 'https://animastor.org/gpu',
+    `no-request fallback: ${app.__hub.publicHubUrl()}`);
+  assert(app.__hub.publicHubUrl({ headers: {} }) === 'https://animastor.org/gpu',
+    'missing Host must fall back to the canonical origin');
+  assert(app.__hub.publicHubUrl({ headers: { host: '127.0.0.1:5000' } }) === 'https://animastor.org/gpu',
+    'non-DNS Host must fall back to the canonical origin');
+  assert(app.__hub.publicHubUrl({ headers: { host: 'gpu.example.com' } }) === 'https://gpu.example.com/gpu',
+    'clean Host must still win over the fallback');
+});
+
+check('config.PUBLIC_HUB_URL beats the forwarded Host (trailing slash trimmed)', () => {
+  const { buildHubApp } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const app = buildHubApp({
+    redis: stubRedis(),
+    config: { PUBLIC_HUB_URL: 'https://animastor.org/gpu/' },
+    intervals: false,
+  });
+  assert(app.__hub.publicHubUrl({ headers: { host: 'gpu.example.com' } }) === 'https://animastor.org/gpu',
+    `PUBLIC_HUB_URL ignored: ${app.__hub.publicHubUrl({ headers: { host: 'gpu.example.com' } })}`);
+});
+
+check('server.js forwards PUBLIC_HUB_URL into the hub config', () => {
+  const src = readSource(path.join(PKG_ROOT, 'server.js'));
+  assert(/PUBLIC_HUB_URL:\s*process\.env\.PUBLIC_HUB_URL/.test(src),
+    'server.js must forward PUBLIC_HUB_URL (the env key is otherwise dead in the container)');
+});
+
+check('hub sources carry no stale animastor.in literal', () => {
+  for (const file of ['gpu-hub.js', 'server.js', 'bootstrap.js', 'tarball.js']) {
+    const src = readSource(path.join(PKG_ROOT, file));
+    assert(!src.includes('animastor.in'), `stale domain literal in ${file}`);
   }
 });
 

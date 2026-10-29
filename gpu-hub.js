@@ -1683,7 +1683,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     if (config.PUBLIC_HUB_URL) return String(config.PUBLIC_HUB_URL).replace(/\/$/, "");
     const host = req && req.headers && typeof req.headers.host === "string" ? req.headers.host : "";
     if (HOSTNAME_RE.test(host)) return `https://${host}/gpu`;
-    return "https://animastor.in/gpu";
+    return "https://animastor.org/gpu";
   }
 
   app.get("/installer", (req, res) => {
@@ -2070,6 +2070,9 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     sweepProcessingOrphans,
     heartbeatAndTimeoutSweep,
     artifactDirs,
+    // Canonical origin embedded into the /installer bootstrap (tests pin the
+    // fallback so the stale-domain regression cannot come back silently).
+    publicHubUrl,
     stopIntervals: () => { if (intervalTimer) clearInterval(intervalTimer); },
   };
 
@@ -2093,6 +2096,7 @@ if (require.main === module) {
       GPU_TIMEOUT_MS: Number(process.env.GPU_TIMEOUT_MS ?? process.env.GPU_TIMEOUT ?? 600000),
       GPU_HUB_API_KEY: process.env.GPU_HUB_API_KEY || null,
       GPU_HUB_ALLOW_OPEN: process.env.GPU_HUB_ALLOW_OPEN || null,
+      PUBLIC_HUB_URL: process.env.PUBLIC_HUB_URL || null,
     },
   });
 
