@@ -10,7 +10,7 @@
     "backend": {
       "repository": "Animastor/animastor-backend",
       "url": "https://github.com/Animastor/animastor-backend",
-      "commit": "6f08cbabfaaddb6545aae38004b0f9f7bbe3dbba"
+      "commit": "95398b2f390353d081cb9a88048bbcf98359e5b5"
     }
   },
   "artifacts": {
@@ -32,7 +32,7 @@
       "source": "backend",
       "path": "packages/animastor-installer/src/installer",
       "files": 36,
-      "sha256_tree": "e6fc852604e943ec9b49ee7a7050927cf639d255de940db83abe4395051907f2",
+      "sha256_tree": "52dabc4915ad91ead1b37498185cda798acd7d7a107642e1de490fbc56a08538",
       "version": "0.2.2"
     },
     "install-manifests": {
