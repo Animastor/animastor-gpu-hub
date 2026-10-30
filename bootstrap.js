@@ -5,7 +5,13 @@
  * cross-platform extension).
  *
  * The hub serves a SMALL, auditable launcher script at GET /installer. The
- * user runs it on the GPU machine; it performs the full bootstrap:
+ * user runs it on the GPU machine with ONE command:
+ *
+ *     curl -fsSL "<hub>/installer?profile=…&mode=…&platform=linux" | bash
+ *
+ * (the URL MUST be quoted — unquoted, the shell treats `&` as "run in
+ * background" and the query parameters are lost). It performs the full
+ * bootstrap:
  *
  *   1. detects the platform implicitly (the script ITSELF is the platform
  *      choice: bash launcher for Linux, PowerShell launcher for Windows);
@@ -20,9 +26,19 @@
  *   5. verifies its integrity against the sha256 the hub publishes at
  *      <HUB_URL>/installer/sha256 (the SAME checksum the web page shows);
  *   6. unpacks it into a temporary directory and runs the real installer
- *      CLI:  node cli.js install --profile <p> --mode <m>  (+ user args);
+ *      CLI:  node cli.js install --profile <p> [--mode <m>] --hub-url <hub>
+ *      (+ user args, which override the embedded values: `| bash -s -- --mode managed`);
+ *      without an embedded mode the installer decides itself (a found
+ *      ComfyUI → existing), it never silently assumes "managed";
  *   7. the Worker Key is asked INTERACTIVELY by the installer (hidden
  *      input) — the launcher never accepts, stores or forwards a key.
+ *
+ * Piped execution (`curl | bash`): the whole script is ONE function called
+ * on the last line, so bash parses it completely before running anything
+ * (a truncated download runs nothing), and the installer's stdin is
+ * redirected to the terminal /dev/tty — it can neither read the rest of
+ * the script as answers nor consume it. Without a terminal the launcher
+ * stops with a clear message (unless --yes is given).
  *
  * Security model (must hold forever):
  *   - NO credential in the script, the download URL, argv, env or the
@@ -35,7 +51,7 @@
  *   - everything else is unpacked into a temp dir wiped on exit.
  */
 
-const BOOTSTRAP_VERSION = '1.1.0';
+const BOOTSTRAP_VERSION = '1.2.0';
 
 /** Pinned Node.js runtime provisioned when the host has none (>= 20 required). */
 const NODE_VERSION = 'v22.23.2';
@@ -46,16 +62,20 @@ const NODE_VERSION = 'v22.23.2';
  * host-checked, profile comes from the canonical manifest allowlist, mode
  * from a fixed enum.
  * @param {{ hubUrl: string, profile: string|null, mode: string|null,
- *           installerVersion: string|null }} args
+ *           installerVersion: string|null, hubVersion?: string|null,
+ *           workerBundleVersion?: string|null }} args
  * @returns {string} the shell script
  */
-function buildBootstrapScript({ hubUrl, profile = null, mode = null, installerVersion = null }) {
+function buildBootstrapScript({ hubUrl, profile = null, mode = null, installerVersion = null, hubVersion = null, workerBundleVersion = null }) {
     const escaped = (v) => String(v).replace(/(["\\$`])/g, '\\$1');
     return `#!/usr/bin/env bash
 # ============================================================================
 # Animastor GPU Worker installer bootstrap (Linux) v${BOOTSTRAP_VERSION}
 # installer bundle version: ${installerVersion ? escaped(installerVersion) : 'latest'}
-# hub: ${escaped(hubUrl)}
+# hub: ${escaped(hubUrl)}${hubVersion ? ` (hub ${escaped(hubVersion)})` : ''}
+#
+# Run (one command, URL in quotes):   curl -fsSL "<this URL>" | bash
+# Override embedded values:           curl -fsSL "<this URL>" | bash -s -- --mode managed
 #
 # What it does: verifies prerequisites, provisions a pinned Node.js runtime
 # if the host has none, downloads the installer bundle, verifies its SHA-256
@@ -67,11 +87,18 @@ function buildBootstrapScript({ hubUrl, profile = null, mode = null, installerVe
 # ============================================================================
 set -euo pipefail
 
-# ---- Configuration (embedded; environment overrides for power users) ----
+# Everything runs inside main(), called on the LAST line: with \`curl | bash\`
+# bash reads the whole function before executing anything.
+main() {
+
+# ---- Configuration (embedded; environment / CLI flags override) ----
 HUB_URL="\${ANIMASTOR_HUB_URL:-${escaped(hubUrl)}}"
 INSTALL_PROFILE="\${ANIMASTOR_PROFILE:-${profile ? escaped(profile) : ''}}"
 INSTALL_MODE="\${ANIMASTOR_MODE:-${mode ? escaped(mode) : ''}}"
 NODE_VERSION="${NODE_VERSION}"
+export ANIMASTOR_BOOTSTRAP_VERSION="${BOOTSTRAP_VERSION}"
+export ANIMASTOR_HUB_VERSION="${hubVersion ? escaped(hubVersion) : ''}"
+export ANIMASTOR_WORKER_BUNDLE_VERSION="${workerBundleVersion ? escaped(workerBundleVersion) : ''}"
 
 # ---- Fail closed: this script NEVER takes credentials ----
 # The Worker Key is entered interactively inside the real installer (hidden
@@ -84,8 +111,10 @@ for var in ANIMASTOR_WORKER_TOKEN WORKER_TOKEN WORKER_KEY; do
     exit 3
   fi
 done
+ASSUME_YES=0
 for arg in "$@"; do
   case "\$arg" in
+    --yes|-y) ASSUME_YES=1 ;;
     *wrk.*|--worker-key*|--worker-token*)
       echo "ERROR: credential-like argument detected: '\$arg'." >&2
       echo "       The Worker Key must be typed at the installer's hidden prompt." >&2
@@ -101,6 +130,27 @@ HUB_URL="\${HUB_URL%/}"
 
 say()  { printf '%s\\n' "\$*"; }
 fail() { printf 'ERROR: %s\\n' "\$*" >&2; exit 1; }
+
+# ---- Terminal: answers and the hidden Worker Key come from /dev/tty ----
+# With \`curl | bash\` stdin is the script itself. The installer gets the
+# terminal as stdin (never the pipe). No terminal and no --yes → stop now,
+# before anything is downloaded.
+INSTALLER_STDIN=""
+if [ -t 0 ]; then
+  INSTALLER_STDIN="stdin"
+elif { : </dev/tty; } 2>/dev/null; then
+  INSTALLER_STDIN="tty"
+elif [ "\$ASSUME_YES" = "1" ]; then
+  INSTALLER_STDIN="null"
+else
+  say "ERROR: no interactive terminal." >&2
+  say "       The installer asks questions and the Worker Key (hidden input), so it" >&2
+  say "       must run in a terminal (SSH session or local console):" >&2
+  say '         curl -fsSL "<install URL>" | bash' >&2
+  say "       Non-interactive re-runs (Worker Key already in the worker .env):" >&2
+  say '         curl -fsSL "<install URL>" | bash -s -- --yes' >&2
+  exit 3
+fi
 
 # ---- Prerequisites (checked, never auto-installed) ----
 FETCH=""
@@ -203,25 +253,27 @@ CLI="\$WORK_DIR/animastor-installer/src/installer/cli.js"
 [ -f "\$CLI" ] || fail "unexpected bundle layout: animastor-installer/src/installer/cli.js not found. The bundle may be corrupt — re-download."
 
 # ---- 4. Run the real installer (profile/mode embedded — nothing to type) ----
-say "[4/4] Starting the Animastor installer (profile: \$INSTALL_PROFILE, mode: \$INSTALL_MODE) ..."
-say "      It will ask for the Worker Key (hidden input) — paste the key from the setup page."
+# An empty mode is NOT "managed": the installer decides (found ComfyUI →
+# existing). User flags come last and override the embedded values.
+INSTALL_ARGS=(install --profile "\$INSTALL_PROFILE" --hub-url "\$HUB_URL")
+[ -n "\$INSTALL_MODE" ] && INSTALL_ARGS+=(--mode "\$INSTALL_MODE")
+say "[4/4] Starting the Animastor installer (profile: \$INSTALL_PROFILE, mode: \${INSTALL_MODE:-auto}) ..."
 say ""
 cd "\$WORK_DIR"
 set +e
-"\$NODE_BIN" "\$CLI" install --profile "\$INSTALL_PROFILE" --mode "\$INSTALL_MODE" "\$@"
+case "\$INSTALLER_STDIN" in
+  stdin) "\$NODE_BIN" "\$CLI" "\${INSTALL_ARGS[@]}" "\$@" ;;
+  tty)   "\$NODE_BIN" "\$CLI" "\${INSTALL_ARGS[@]}" "\$@" </dev/tty ;;
+  *)     "\$NODE_BIN" "\$CLI" "\${INSTALL_ARGS[@]}" "\$@" </dev/null ;;
+esac
 STATUS=\$?
 set -e
-
-say ""
-if [ \$STATUS -eq 0 ]; then
-  say "Done. Return to the Animastor setup page — the worker status becomes"
-  say "Online after its first heartbeat (usually within 30 seconds)."
-else
-  say "The installer exited with an error (code \$STATUS). Nothing was hidden:" >&2
-  say "scroll up for the remediation the installer printed, fix the issue and" >&2
-  say "re-run this script — it is safe to run repeatedly." >&2
-fi
+# The installer itself ends with the RESULT block (✓ per check, or one cause
+# + one fix command per ✗) — nothing to add here.
 exit \$STATUS
+}
+
+main "\$@"
 `;
 }
 
@@ -380,26 +432,23 @@ try {
     if (-not (Test-Path $cli)) { Fail 'unexpected bundle layout: animastor-installer/src/installer/cli.js not found. The bundle may be corrupt - re-download.' }
 
     # ---- 4. Run the real installer (profile/mode embedded - nothing to type) ----
-    Write-Host "[4/4] Starting the Animastor installer (profile: $InstallProfile, mode: $InstallMode) ..."
-    Write-Host '      It will ask for the Worker Key (hidden input) - paste the key from the setup page.'
+    Write-Host "[4/4] Starting the Animastor installer (profile: $InstallProfile, mode: $(if ($InstallMode) { $InstallMode } else { 'auto' })) ..."
     Write-Host ''
     Push-Location $workDir
-    & $NodeBin $cli install --profile $InstallProfile --mode $InstallMode @args
+    # An empty mode is NOT "managed": the installer decides (found ComfyUI →
+    # existing). User arguments come last and override the embedded values.
+    $installArgs = @('install', '--profile', $InstallProfile, '--hub-url', $HubUrl)
+    if ($InstallMode) { $installArgs += @('--mode', $InstallMode) }
+    & $NodeBin $cli @installArgs @args
     $status = $LASTEXITCODE
     Pop-Location
 } finally {
     Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
 }
 
-Write-Host ''
-if ($status -eq 0) {
-    Write-Host 'Done. Return to the Animastor setup page - the worker status becomes Online after its first heartbeat (usually within 30 seconds).'
-    exit 0
-} else {
-    Write-Host "The installer exited with an error (code $status). Nothing was hidden:" -ForegroundColor Yellow
-    Write-Host 'scroll up for the remediation the installer printed, fix the issue and re-run this script - it is safe to run repeatedly.'
-    exit $status
-}
+# The installer itself ends with the RESULT block (a check mark per check, or
+# one cause + one fix command per failed check) - nothing to add here.
+exit $status
 `;
 }
 

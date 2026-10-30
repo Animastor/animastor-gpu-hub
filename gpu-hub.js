@@ -1647,6 +1647,12 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   //   GET /installer/bundle     self-contained installer package (tar.gz)
   //   GET /installer/sha256     installer checksum + version metadata
 
+  // This hub's own version (package.json) — embedded into the bootstrap for
+  // the installer banner.
+  const HUB_PACKAGE_VERSION = (() => {
+    try { return require("./package.json").version || null; } catch (_) { return null; }
+  })();
+
   // Modes the bootstrap may embed — mirrors the setup contract INSTALL_MODES.
   const BOOTSTRAP_MODES = new Set(["managed", "existing", "shared", "isolated"]);
 
@@ -1725,6 +1731,10 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
       profile,
       mode,
       installerVersion: meta.version,
+      // Shown in the installer banner (non-secret): this hub's package
+      // version and the worker bundle version it serves.
+      hubVersion: HUB_PACKAGE_VERSION,
+      workerBundleVersion: workerBundleMeta().version,
     };
     const headers = {
       "Cache-Control": "no-store",

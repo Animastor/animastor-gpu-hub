@@ -75,7 +75,7 @@ function readSource(p) {
 
 // ── 1. package smoke ─────────────────────────────────────────────────────
 
-console.log('\n[1/7] package smoke');
+console.log('\n[1/8] package smoke');
 
 check('package identity is @animastor/gpu-hub@0.1.0', () => {
   const pkg = readPkg();
@@ -120,7 +120,7 @@ check('buildHubApp factory constructs with a stub Redis (no eager connections)',
 
 // ── 2. dependency isolation ──────────────────────────────────────────────
 
-console.log('\n[2/7] dependency isolation');
+console.log('\n[2/8] dependency isolation');
 
 check('runtime files never require monorepo code (backend/worker/frontend/parent escapes)', () => {
   const banned = /require\(\s*['"][^'"]*(backend\/src|backend\/ai|worker\/worker|frontends|\.\.\/)+/;
@@ -162,7 +162,7 @@ check('hub sources stay pg/postgres-free', () => {
 
 // ── 3. canonical contracts import ────────────────────────────────────────
 
-console.log('\n[3/7] canonical contracts import');
+console.log('\n[3/8] canonical contracts import');
 
 check('gpu-hub.js consumes @animastor/contracts (the single protocol source)', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -182,7 +182,7 @@ check('@animastor/contracts resolves inside the package tree (registry or provid
 
 // ── 4. protocol parity ───────────────────────────────────────────────────
 
-console.log('\n[4/7] protocol parity');
+console.log('\n[4/8] protocol parity');
 
 check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', () => {
   const hub = require(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -193,7 +193,7 @@ check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', ()
 
 // ── 5. route freeze ──────────────────────────────────────────────────────
 
-console.log('\n[5/7] route freeze');
+console.log('\n[5/8] route freeze');
 
 check('route surface is EXACTLY the frozen 14-route set (additions and removals both fail)', () => {
   const FROZEN_ROUTES = [
@@ -220,7 +220,7 @@ check('deprecated /worker-source backward-compat markers intact', () => {
 
 // ── 6. Redis ownership ───────────────────────────────────────────────────
 
-console.log('\n[6/7] Redis ownership');
+console.log('\n[6/8] Redis ownership');
 
 check('hub-owned key constants keep their frozen values', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -251,7 +251,7 @@ check('hub still reads the mirror + SYNC anchors intact (frozen worker-auth debt
 
 // ── 7. artifact directory resolution (Phase 10T precedence fix) ───────────
 
-console.log('\n[7/7] artifact resolution + public hub origin');
+console.log('\n[7/8] artifact resolution + public hub origin');
 
 function stubRedis() {
   const noop = () => {};
@@ -356,6 +356,85 @@ check('hub sources carry no stale animastor.in literal', () => {
     const src = readSource(path.join(PKG_ROOT, file));
     assert(!src.includes('animastor.in'), `stale domain literal in ${file}`);
   }
+});
+
+// ── 8. bootstrap launcher (curl | bash) ─────────────────────────────────
+
+console.log('\n[8/8] bootstrap launcher (piped execution, TTY, embedded context)');
+
+const { buildBootstrapScript, buildWindowsBootstrapScript } = require(path.join(PKG_ROOT, 'bootstrap.js'));
+const { execFileSync, spawnSync } = require('child_process');
+
+function bootScript(over = {}) {
+  return buildBootstrapScript({
+    hubUrl: 'https://animastor.org/gpu', profile: 'audio/qwen-tts', mode: 'existing',
+    installerVersion: '0.2.0', hubVersion: '0.1.0', workerBundleVersion: '2.2.0', ...over,
+  });
+}
+
+check('bootstrap is valid bash and runs entirely inside main() called on the last line', () => {
+  const s = bootScript();
+  execFileSync('bash', ['-n'], { input: s });
+  const lines = s.trimEnd().split('\n');
+  assert(lines[lines.length - 1] === 'main "$@"', `last line: ${lines[lines.length - 1]}`);
+  assert(/^main\(\) \{$/m.test(s), 'main() wrapper');
+});
+
+check('bootstrap feeds the installer the terminal (never the piped script) and stops without one', () => {
+  const s = bootScript();
+  assert(s.includes('"${INSTALL_ARGS[@]}" "$@" </dev/tty'), 'installer stdin = /dev/tty when piped');
+  assert(s.includes('elif { : </dev/tty; } 2>/dev/null; then'), 'tty probe');
+  assert(s.includes('ERROR: no interactive terminal.'), 'clear no-TTY error');
+  assert(!/scroll up/i.test(s), 'no "scroll up" — the installer prints the RESULT block');
+});
+
+check('bootstrap without a terminal and without --yes exits 3 before downloading anything', () => {
+  const r = spawnSync('bash', ['-s'], {
+    input: bootScript({ hubUrl: 'http://127.0.0.1:1/gpu' }),
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    detached: true, // no controlling terminal → /dev/tty unavailable
+    timeout: 20000,
+  });
+  const out = String(r.stdout) + String(r.stderr);
+  if (/No such device|Device not configured/.test(execFileSync('bash', ['-c', '{ : </dev/tty; } 2>&1 || true'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], detached: true }))) {
+    assert(r.status === 3, `exit ${r.status}: ${out.slice(0, 300)}`);
+    assert(out.includes('no interactive terminal'), out.slice(0, 300));
+    assert(!out.includes('Downloading the Animastor installer bundle'), 'nothing downloaded');
+  }
+});
+
+check('bootstrap embeds profile/mode, passes --hub-url, and an empty mode is NOT "managed"', () => {
+  const s = bootScript();
+  assert(s.includes('INSTALL_PROFILE="${ANIMASTOR_PROFILE:-audio/qwen-tts}"'));
+  assert(s.includes('INSTALL_MODE="${ANIMASTOR_MODE:-existing}"'));
+  assert(s.includes('INSTALL_ARGS=(install --profile "$INSTALL_PROFILE" --hub-url "$HUB_URL")'));
+  assert(s.includes('[ -n "$INSTALL_MODE" ] && INSTALL_ARGS+=(--mode "$INSTALL_MODE")'), 'mode only when set');
+  const noMode = bootScript({ mode: null });
+  assert(noMode.includes('INSTALL_MODE="${ANIMASTOR_MODE:-}"'));
+  assert(!noMode.split('\n').some((l) => !l.startsWith('#') && /--mode\s+"?managed/.test(l)), 'never a hard-coded managed');
+  // user flags come after the embedded ones (last wins in the installer)
+  assert(s.includes('"${INSTALL_ARGS[@]}" "$@"'));
+});
+
+check('bootstrap exports versions for the installer banner', () => {
+  const s = bootScript();
+  assert(s.includes('export ANIMASTOR_HUB_VERSION="0.1.0"'));
+  assert(s.includes('export ANIMASTOR_WORKER_BUNDLE_VERSION="2.2.0"'));
+  assert(/export ANIMASTOR_BOOTSTRAP_VERSION="\d+\.\d+\.\d+"/.test(s));
+});
+
+check('windows launcher: --hub-url, optional mode, no "scroll up"', () => {
+  const ps = buildWindowsBootstrapScript({ hubUrl: 'https://animastor.org/gpu', profile: 'audio/qwen-tts', mode: null, installerVersion: '0.2.0' });
+  assert(ps.includes("'--hub-url', $HubUrl"));
+  assert(ps.includes("if ($InstallMode) { $installArgs += @('--mode', $InstallMode) }"));
+  assert(!/scroll up/i.test(ps));
+});
+
+check('GET /installer embeds the hub version and the served worker bundle version', () => {
+  const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
+  assert(/hubVersion: HUB_PACKAGE_VERSION/.test(src));
+  assert(/workerBundleVersion: workerBundleMeta\(\)\.version/.test(src));
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
