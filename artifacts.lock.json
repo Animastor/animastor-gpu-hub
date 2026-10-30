@@ -10,7 +10,7 @@
     "backend": {
       "repository": "Animastor/animastor-backend",
       "url": "https://github.com/Animastor/animastor-backend",
-      "commit": "c5cbd3c8da97d9a70cf15e8d86a3707946c814c7"
+      "commit": "f9d1e26fa57e8e09ef2f40b236350f70df063eae"
     }
   },
   "artifacts": {
