@@ -5,12 +5,12 @@
     "worker": {
       "repository": "Animastor/animastor-worker",
       "url": "https://github.com/Animastor/animastor-worker",
-      "commit": "3602b10b42671c19686a9e6ac128bd44ad08f112"
+      "commit": "029489dfb414d7d3664dcb9ed3edb99315bf7994"
     },
     "backend": {
       "repository": "Animastor/animastor-backend",
       "url": "https://github.com/Animastor/animastor-backend",
-      "commit": "6048569296317ab3ca8b3eb223bbf454ea11e646"
+      "commit": "19975ffebed98b98a08d77608ee93d2324e66f8c"
     }
   },
   "artifacts": {
@@ -32,7 +32,7 @@
       "source": "backend",
       "path": "packages/animastor-installer/src/installer",
       "files": 35,
-      "sha256_tree": "5c0b1076352877c3a66851712793d1a096358e1453a3c9a6b9d91224bac310c9",
+      "sha256_tree": "cc51795a7356ca5f5c6365b66b4b0e4f8e38a7d6c120ae2eb2f8d0c332f3035e",
       "version": "0.2.0"
     },
     "install-manifests": {
