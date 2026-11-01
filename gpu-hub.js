@@ -609,34 +609,44 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
 
       if (now - gpu.last_seen > GPU_TIMEOUT_MS) {
 
-        console.log("💀 GPU timeout:", id)
-
+        // Distinguish an idle worker that simply went offline (normal after a
+        // run) from a worker that died WHILE holding jobs. The old code logged
+        // the same scary 💀 line for both; an idle shutdown is not an incident.
+        const gpuJobs = [];
         for (const [job_id, data] of runningMap) {
-          if (data.worker === id) {
-            // Skip if already handled by per-job timeout
-            const jobTimeoutMs = data.timeout_ms || GPU_TIMEOUT_MS;
-            const jobStarted = data.started_at || 0;
-            if (now - jobStarted > jobTimeoutMs) continue;
+          if (data.worker !== id) continue;
+          // Skip if already handled by per-job timeout
+          const jobTimeoutMs = data.timeout_ms || GPU_TIMEOUT_MS;
+          const jobStarted = data.started_at || 0;
+          if (now - jobStarted > jobTimeoutMs) continue;
+          gpuJobs.push([job_id, data]);
+        }
 
-            console.log("💀 Worker timeout, reporting failure:", job_id)
+        if (gpuJobs.length === 0) {
+          console.log(`[GPU] worker offline: ${id} (no running jobs, last heartbeat ${Math.round((now - gpu.last_seen) / 1000)}s ago)`)
+        } else {
+          console.log(`💀 GPU timeout: ${id} (running jobs: ${gpuJobs.length})`)
+        }
 
-            await redis.hdel("animastor:running", job_id)
-            if (data.task_raw) {
-              await redis.lrem("animastor:processing", 1, data.task_raw).catch(() => {})
-            }
-            await redis.hdel(PROCESSING_CLAIMED_KEY, job_id).catch(() => {})
+        for (const [job_id, data] of gpuJobs) {
+          console.log("💀 Worker timeout, reporting failure:", job_id)
 
-            // Освобождаем dedup очереди, чтобы re-dispatch backend'а не
-            // отбился как duplicate.
-            if (data.dispatch_id) {
-              await redis.del(jobDedupKey(job_id, data.dispatch_id)).catch(() => {})
-            }
-
-            await notifyBackendError(job_id, data.build_id, data.dispatch_id, "worker_timeout", {
-              worker_id: data.worker || null,
-              workspace_id: data.workspace_id || null
-            })
+          await redis.hdel("animastor:running", job_id)
+          if (data.task_raw) {
+            await redis.lrem("animastor:processing", 1, data.task_raw).catch(() => {})
           }
+          await redis.hdel(PROCESSING_CLAIMED_KEY, job_id).catch(() => {})
+
+          // Освобождаем dedup очереди, чтобы re-dispatch backend'а не
+          // отбился как duplicate.
+          if (data.dispatch_id) {
+            await redis.del(jobDedupKey(job_id, data.dispatch_id)).catch(() => {})
+          }
+
+          await notifyBackendError(job_id, data.build_id, data.dispatch_id, "worker_timeout", {
+            worker_id: data.worker || null,
+            workspace_id: data.workspace_id || null
+          })
         }
 
         await deleteGpuFromRedis(id);
