@@ -424,6 +424,48 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     return `animastor:job:${dispatch_id}:${job_id}`;
   }
 
+  // ======================================================
+  // RESULT ACK (fallback key lifecycle)
+  // ======================================================
+  // /task/result stores animastor:result:* BEFORE the backend POST so a lost
+  // delivery can be replayed by the backend reconciler. The hub is the only
+  // writer of that key and the only party that sees the backend's answer, so
+  // the hub removes it on ACK. Final = the backend settled this delivery:
+  //   {ok:true}                 → processed (fenced commit / ready chain ran);
+  //   {ok:true, rejected:true}  → terminal (identity/receipt/fence) — a
+  //                               replay is rejected the same way.
+  // NOT final → the key stays for reconcile:
+  //   {ok:true, deduped:true}   → the backend dedup marker is dispatch-
+  //                               independent; for a NEW generation of the
+  //                               same job_id it can still belong to the
+  //                               previous one. The reconciler compares the
+  //                               dispatch recorded in the marker and drops
+  //                               the key itself when it is a true duplicate.
+  //   unreadable body / non-2xx → unknown outcome.
+  const RESULT_ACK_DELETE_SCRIPT =
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+
+  async function readAckBody(res) {
+    try {
+      if (res && typeof res.json === 'function') return await res.json();
+    } catch (_) {}
+    return null;
+  }
+
+  function resultAckIsFinal(body) {
+    return !!(body && body.ok === true && body.deduped !== true);
+  }
+
+  async function ackDeleteResultKey(key, expectedValue) {
+    try {
+      return Number(await redis.eval(RESULT_ACK_DELETE_SCRIPT, 1, key, expectedValue)) || 0;
+    } catch (err) {
+      // Best-effort: a kept key is replayed by reconcile and deduplicated there.
+      console.warn(`⚠️ result ACK delete failed for ${key}: ${err.message}`);
+      return 0;
+    }
+  }
+
   async function notifyBackendError(job_id, build_id, dispatch_id, reason, ownership = {}) {
     for (let i = 0; i < 5; i++) {
       try {
@@ -1182,6 +1224,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     }
 
     let success = false
+    let ackBody = null
 
     for (let i = 0; i < 5; i++) {
       try {
@@ -1209,6 +1252,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
         }
 
         success = true
+        ackBody = await readAckBody(backendRes)
         break
       } catch (err) {
         console.error(`⚠️ backend retry ${i + 1} failed`, job_id, err.message)
@@ -1218,6 +1262,12 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
 
     if (!success) {
       console.error("❌ backend delivery failed:", job_id)
+    } else if (resultAckIsFinal(ackBody)) {
+      // ACK: the backend settled THIS delivery (processed or terminally
+      // rejected) — the fallback copy has done its job. Compare-and-delete:
+      // the key is per scene×type, so the next IU of the same scene may have
+      // overwritten it meanwhile; that copy must stay for recovery.
+      await ackDeleteResultKey(resultRedisKey, resultData)
     }
 
     res.json({ ok: true })
