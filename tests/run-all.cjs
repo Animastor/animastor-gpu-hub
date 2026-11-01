@@ -23,6 +23,9 @@
  *                            baked-in, configured-but-missing fails loudly;
  *                            public hub origin — canonical animastor.org
  *                            fallback, no stale .in literal
+ *   8. bootstrap launcher  — piped execution, TTY, embedded context
+ *   9. result ACK          — /task/result drops animastor:result:* on a
+ *                            final backend ACK (tests/result-ack.cjs)
  */
 
 const fs = require('fs');
@@ -75,7 +78,7 @@ function readSource(p) {
 
 // ── 1. package smoke ─────────────────────────────────────────────────────
 
-console.log('\n[1/8] package smoke');
+console.log('\n[1/9] package smoke');
 
 check('package identity is @animastor/gpu-hub@0.1.0', () => {
   const pkg = readPkg();
@@ -120,7 +123,7 @@ check('buildHubApp factory constructs with a stub Redis (no eager connections)',
 
 // ── 2. dependency isolation ──────────────────────────────────────────────
 
-console.log('\n[2/8] dependency isolation');
+console.log('\n[2/9] dependency isolation');
 
 check('runtime files never require monorepo code (backend/worker/frontend/parent escapes)', () => {
   const banned = /require\(\s*['"][^'"]*(backend\/src|backend\/ai|worker\/worker|frontends|\.\.\/)+/;
@@ -162,7 +165,7 @@ check('hub sources stay pg/postgres-free', () => {
 
 // ── 3. canonical contracts import ────────────────────────────────────────
 
-console.log('\n[3/8] canonical contracts import');
+console.log('\n[3/9] canonical contracts import');
 
 check('gpu-hub.js consumes @animastor/contracts (the single protocol source)', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -182,7 +185,7 @@ check('@animastor/contracts resolves inside the package tree (registry or provid
 
 // ── 4. protocol parity ───────────────────────────────────────────────────
 
-console.log('\n[4/8] protocol parity');
+console.log('\n[4/9] protocol parity');
 
 check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', () => {
   const hub = require(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -193,7 +196,7 @@ check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', ()
 
 // ── 5. route freeze ──────────────────────────────────────────────────────
 
-console.log('\n[5/8] route freeze');
+console.log('\n[5/9] route freeze');
 
 check('route surface is EXACTLY the frozen 14-route set (additions and removals both fail)', () => {
   const FROZEN_ROUTES = [
@@ -220,7 +223,7 @@ check('deprecated /worker-source backward-compat markers intact', () => {
 
 // ── 6. Redis ownership ───────────────────────────────────────────────────
 
-console.log('\n[6/8] Redis ownership');
+console.log('\n[6/9] Redis ownership');
 
 check('hub-owned key constants keep their frozen values', () => {
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
@@ -251,7 +254,7 @@ check('hub still reads the mirror + SYNC anchors intact (frozen worker-auth debt
 
 // ── 7. artifact directory resolution (Phase 10T precedence fix) ───────────
 
-console.log('\n[7/8] artifact resolution + public hub origin');
+console.log('\n[7/9] artifact resolution + public hub origin');
 
 function stubRedis() {
   const noop = () => {};
@@ -360,7 +363,7 @@ check('hub sources carry no stale animastor.in literal', () => {
 
 // ── 8. bootstrap launcher (curl | bash) ─────────────────────────────────
 
-console.log('\n[8/8] bootstrap launcher (piped execution, TTY, embedded context)');
+console.log('\n[8/9] bootstrap launcher (piped execution, TTY, embedded context)');
 
 const { buildBootstrapScript, buildWindowsBootstrapScript } = require(path.join(PKG_ROOT, 'bootstrap.js'));
 const { execFileSync, spawnSync } = require('child_process');
@@ -435,6 +438,16 @@ check('GET /installer embeds the hub version and the served worker bundle versio
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
   assert(/hubVersion: HUB_PACKAGE_VERSION/.test(src));
   assert(/workerBundleVersion: workerBundleMeta\(\)\.version/.test(src));
+});
+
+// ── 9. result ACK (behavioural, separate async process) ──────────────────
+
+console.log('\n[9/9] result ACK — fallback key lifecycle');
+
+check('/task/result removes animastor:result:* on a final backend ACK, keeps it otherwise (tests/result-ack.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'result-ack.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
+  assert(r.status === 0, `result-ack.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
