@@ -25,7 +25,9 @@
  *                            fallback, no stale .in literal
  *   8. bootstrap launcher  — piped execution, TTY, embedded context
  *   9. result ACK          — /task/result drops animastor:result:* on a
- *                            final backend ACK (tests/result-ack.cjs)
+ *                            final backend ACK (tests/result-ack.cjs);
+ *                            /task/error forwards the optional error_class /
+ *                            comfy_status (tests/task-error-forward.cjs)
  */
 
 const fs = require('fs');
@@ -448,6 +450,12 @@ check('/task/result removes animastor:result:* on a final backend ACK, keeps it 
   const r = spawnSync(process.execPath, [path.join(__dirname, 'result-ack.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
   process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
   assert(r.status === 0, `result-ack.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
+});
+
+check('/task/error forwards optional error_class / comfy_status to the backend (tests/task-error-forward.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'task-error-forward.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
+  assert(r.status === 0, `task-error-forward.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
