@@ -466,7 +466,20 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     }
   }
 
-  async function notifyBackendError(job_id, build_id, dispatch_id, reason, ownership = {}) {
+  // GPU retry policy (2026-11-02): optional structured error fields from
+  // workers 2.2.3+ — forwarded as-is after a shape check (the backend
+  // classifies; unknown/invalid values are dropped, never invented here).
+  const ERROR_CLASSES = new Set(["deterministic", "transient", "oom"])
+  function errorClassFields(body) {
+    const out = {}
+    const cls = body && typeof body.error_class === "string" ? body.error_class.trim().toLowerCase() : ""
+    if (ERROR_CLASSES.has(cls)) out.error_class = cls
+    const st = body ? Number(body.comfy_status) : NaN
+    if (Number.isInteger(st) && st >= 100 && st <= 599) out.comfy_status = st
+    return out
+  }
+
+  async function notifyBackendError(job_id, build_id, dispatch_id, reason, ownership = {}, errorFields = {}) {
     for (let i = 0; i < 5; i++) {
       try {
         const backendRes = await doFetch(
@@ -483,7 +496,8 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
               // PW-2: audit-only forwarding — the backend re-verifies
               // job→book→workspace itself and never trusts these fields.
               worker_id: ownership.worker_id || null,
-              workspace_id: ownership.workspace_id || null
+              workspace_id: ownership.workspace_id || null,
+              ...errorFields
             })
           }
         )
@@ -504,6 +518,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
           dispatch_id,
           protocol_version: PROTOCOL_VERSION,
           reason: reason || "unknown",
+          ...errorFields,
           ts: Date.now()
         }),
         "EX",
@@ -1363,7 +1378,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
     await notifyBackendError(job_id, build_id, dispatch_id, reason || "worker_error", {
       worker_id: runningInfo.worker || null,
       workspace_id: runningInfo.workspace_id || null
-    })
+    }, errorClassFields(req.body))
 
     res.json({ ok: true })
   })
