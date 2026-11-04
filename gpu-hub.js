@@ -529,6 +529,54 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   }
 
   // ======================================================
+  // STALE DISPATCH (409) — explicit detail + backend signal
+  // ======================================================
+  // v0.2.9 (reports/2026-11-04/regenerate-sweep-fix.md): /task/result and
+  // /task/error answer 409 stale_or_unknown_dispatch with a `detail`:
+  //   no_running_record — the claim of this job is gone from
+  //                       animastor:running (a queue cleanup removed it, or
+  //                       the orphan sweep / timeout finalised it);
+  //   dispatch_mismatch — the job is running under ANOTHER dispatch (it was
+  //                       re-dispatched; the current dispatch is alive).
+  // The result itself is NOT accepted: without the running record the hub
+  // cannot prove the submitter is the claimer (PW-4 fail closed). For
+  // no_running_record the backend is told ONCE per dispatch×job through the
+  // regular error path (POST /gpu/task/error, fallback animastor:error:*),
+  // reason `stale_dispatch_result`, error_class `transient`: the backend
+  // verifies the dispatch identity itself — a cancelled/superseded dispatch
+  // is rejected there, a live one is failed and retried by the GPU retry
+  // policy (command-gated). dispatch_mismatch is never signalled.
+  const STALE_SIGNAL_PREFIX = 'animastor:stale-dispatch-signal'
+  const STALE_SIGNAL_TTL_S = 3600
+
+  function staleDispatchDetail(runningInfo) {
+    return runningInfo ? 'dispatch_mismatch' : 'no_running_record'
+  }
+
+  async function signalStaleDispatch(job_id, build_id, dispatch_id, auth, source) {
+    try {
+      const first = await redis.set(`${STALE_SIGNAL_PREFIX}:${dispatch_id}:${job_id}`, String(Date.now()), 'EX', STALE_SIGNAL_TTL_S, 'NX')
+      if (!first) return false
+    } catch (_) { return false }
+    console.warn(`📣 stale dispatch signalled to backend: ${job_id} dispatch=${dispatch_id} source=${source}`)
+    return notifyBackendError(job_id, build_id, dispatch_id, 'stale_dispatch_result', {
+      worker_id: auth && auth.worker_id || null,
+      workspace_id: auth && auth.workspace_id || null
+    }, { error_class: 'transient', hub_detail: 'no_running_record', source })
+  }
+
+  function rejectStaleDispatch(res, kind, { job_id, build_id, dispatch_id, runningInfo, auth, workerReason }) {
+    const detail = staleDispatchDetail(runningInfo)
+    console.warn(`⚠️ ${kind} rejected 409 (${detail}): ${job_id} dispatch=${dispatch_id} worker=${auth && auth.worker_id || 'unknown'}${workerReason ? ` reason=${String(workerReason).slice(0, 200)}` : ''}`)
+    if (detail === 'no_running_record') {
+      // Fire-and-forget: the worker gets its 409 at once; delivery retries
+      // (and the animastor:error:* fallback) run in the background.
+      signalStaleDispatch(job_id, build_id, dispatch_id, auth, kind === 'Result' ? 'task_result' : 'task_error').catch(() => {})
+    }
+    return res.status(409).json({ error: "stale_or_unknown_dispatch", detail, job_id, dispatch_id })
+  }
+
+  // ======================================================
   // HEARTBEAT REFRESH + GPU TIMEOUT + ORPHAN SWEEP (10s)
   // ======================================================
   // Responsibilities of the interval:
@@ -1169,7 +1217,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
       }
     } catch (_) {}
     if (!runningInfo || runningInfo.dispatch_id !== dispatch_id) {
-      return res.status(409).json({ error: "stale_or_unknown_dispatch" })
+      return rejectStaleDispatch(res, 'Result', { job_id, build_id, dispatch_id, runningInfo, auth })
     }
 
     // PW-4 claimer check: the submitter must BE the claimer and the job's
@@ -1325,7 +1373,7 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
       }
     } catch (_) {}
     if (!runningInfo || runningInfo.dispatch_id !== dispatch_id) {
-      return res.status(409).json({ error: "stale_or_unknown_dispatch" })
+      return rejectStaleDispatch(res, 'Error', { job_id, build_id, dispatch_id, runningInfo, auth, workerReason: reason })
     }
 
     // PW-4 claimer check (symmetric with /task/result). SH-1: borrowed
