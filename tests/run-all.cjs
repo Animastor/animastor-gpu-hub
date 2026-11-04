@@ -27,7 +27,9 @@
  *   9. result ACK          — /task/result drops animastor:result:* on a
  *                            final backend ACK (tests/result-ack.cjs);
  *                            /task/error forwards the optional error_class /
- *                            comfy_status (tests/task-error-forward.cjs)
+ *                            comfy_status (tests/task-error-forward.cjs);
+ *                            409 detail + stale-dispatch signal, idle
+ *                            heartbeat (tests/stale-dispatch-409.cjs)
  */
 
 const fs = require('fs');
@@ -456,6 +458,12 @@ check('/task/error forwards optional error_class / comfy_status to the backend (
   const r = spawnSync(process.execPath, [path.join(__dirname, 'task-error-forward.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
   process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
   assert(r.status === 0, `task-error-forward.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
+});
+
+check('409 detail + one backend signal for a lost claim; idle /beacon heartbeat (tests/stale-dispatch-409.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'stale-dispatch-409.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
+  assert(r.status === 0, `stale-dispatch-409.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
