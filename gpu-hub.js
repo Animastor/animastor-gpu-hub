@@ -27,6 +27,7 @@ const cors = require("cors")
 const crypto = require("crypto")
 const fs = require("fs")
 const path = require("path")
+const zlib = require("zlib")
 const { buildTarGz, walkDir } = require("./tarball")
 const { buildBootstrapScript, buildWindowsBootstrapScript, BOOTSTRAP_VERSION } = require("./bootstrap")
 
@@ -296,7 +297,13 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
 
   const app = express()
   app.use(cors())
-  app.use(express.json({ limit: "500mb" }))
+  // /v3/logs carries a gzip body and its own 128 KiB wire limit: its route
+  // reads the raw stream itself (registered in the v3 section below), so the
+  // global JSON parser must not consume it first.
+  app.use(express.json({
+    limit: "500mb",
+    type: (req) => path.posix.normalize(req.path) !== '/v3/logs',
+  }))
 
   // ======================================================
   // API KEY AUTH
@@ -2280,6 +2287,91 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
       return relayFailed(res, err, "beacon");
     }
     return forwardRelay(res, out, "beacon");
+  });
+
+  // POST /v3/logs — fresh worker logs (ORCHESTRATION_V2 §8.5).
+  // The worker sends a gzip JSON body {worker_id, seq_from, seq_to, lines[]}
+  // with its Bearer. The hub: authenticates with the SAME worker gate, keeps
+  // NO copy (no Redis write), enforces a 128 KiB wire limit (413 beyond it)
+  // and forwards the parsed body to the backend inside the docker network.
+  // The backend URL identity is the token's worker_id — the body's worker_id
+  // is a label and is never trusted.
+  const V3_LOG_BODY_LIMIT = Number(config.V3_LOG_BODY_LIMIT) > 0 ? Number(config.V3_LOG_BODY_LIMIT) : 128 * 1024;
+  const V3_LOG_INFLATED_LIMIT = Number(config.V3_LOG_INFLATED_LIMIT) > 0 ? Number(config.V3_LOG_INFLATED_LIMIT) : 1024 * 1024;
+
+  /** Read the request body with a hard byte ceiling (413 semantics). */
+  function readRawBodyLimited(req, limit) {
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      let size = 0;
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        // Drain the rest instead of destroying the socket: the caller still
+        // needs to deliver the 413/400 answer over this connection.
+        try { req.resume(); } catch (_) {}
+        reject(err);
+      };
+      req.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > limit) return fail(Object.assign(new Error("payload too large"), { code: "too_large" }));
+        chunks.push(chunk);
+      });
+      req.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve(Buffer.concat(chunks));
+      });
+      req.on("error", (err) => fail(err));
+    });
+  }
+
+  function decodeLogBody(raw, encoding) {
+    let buf = raw;
+    const enc = String(encoding || "").toLowerCase();
+    if (enc.includes("gzip")) {
+      buf = zlib.gunzipSync(raw, { maxOutputLength: V3_LOG_INFLATED_LIMIT });
+    } else if (enc.includes("deflate")) {
+      buf = zlib.inflateSync(raw, { maxOutputLength: V3_LOG_INFLATED_LIMIT });
+    } else if (buf.length > V3_LOG_INFLATED_LIMIT) {
+      throw Object.assign(new Error("payload too large"), { code: "too_large" });
+    }
+    return JSON.parse(buf.toString("utf8"));
+  }
+
+  app.post("/v3/logs", async (req, res) => {
+    const auth = await requireWorkerCredential(redis, req, res);
+    if (!auth) return;
+    if (v3Unavailable(res)) return;
+    let raw;
+    try {
+      raw = await readRawBodyLimited(req, V3_LOG_BODY_LIMIT);
+    } catch (err) {
+      if (err && err.code === "too_large") {
+        return res.status(413).json({ error: "payload_too_large", message: `limit ${V3_LOG_BODY_LIMIT} bytes` });
+      }
+      return res.status(400).json({ error: "bad_request", message: "could not read the body" });
+    }
+    let payload;
+    try {
+      payload = decodeLogBody(raw, req.headers["content-encoding"]);
+    } catch (err) {
+      if (err && (err.code === "too_large" || err.code === "ERR_BUFFER_TOO_LARGE" || err.code === "ERR_OUT_OF_RANGE")) {
+        return res.status(413).json({ error: "payload_too_large" });
+      }
+      return res.status(400).json({ error: "invalid_json" });
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.lines)) {
+      return res.status(400).json({ error: "bad_request", message: "lines[] required" });
+    }
+    let out;
+    try {
+      out = await relayToBackend(`/internal/workers/${auth.worker_id}/logs`, payload);
+    } catch (err) {
+      return relayFailed(res, err, "logs");
+    }
+    return forwardRelay(res, out, "logs");
   });
 
   // Expose internals for tests / server.js lifecycle.
