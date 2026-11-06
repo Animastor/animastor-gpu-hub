@@ -28,6 +28,7 @@ npm test           # zero-dependency suite: package smoke, import isolation,
 | `PORT` | `5000` | HTTP listen port |
 | `REDIS_URL` | `redis://animastor-redis:6379` | Redis connection |
 | `BACKEND_URL` | `http://animastor-backend:3000` | Backend base URL for result/error callbacks |
+| `BACKEND_INTERNAL_URL` | — (empty) | Protocol 3 relay target inside the docker network (e.g. `http://animastor-backend:3000`). Empty → `/v3/*` answer `503 v3_not_configured` |
 | `GPU_HUB_API_KEY` | — (empty) | Shared API key for backend → hub calls (`/task`, `/queue/clear`). Empty = no auth (dev only) |
 | `GPU_TIMEOUT_MS` / `GPU_TIMEOUT` | `600000` | GPU task hard timeout (ms) |
 | `SHARE_FEATURES_ENABLED` | `0` | Worker-sharing V1 kill-switch (default OFF) |
@@ -38,19 +39,26 @@ npm test           # zero-dependency suite: package smoke, import isolation,
 
 ## HTTP contract
 
-Frozen route set (14 routes — see `docs/architecture/GPU_HUB_CONTRACT.md` §3):
+Frozen route set (16 routes — see `docs/architecture/GPU_HUB_CONTRACT.md` §3):
 
 - `POST /beacon` — worker heartbeat
 - `POST /task` — backend submits a GPU job (API key)
 - `GET /task/next` — worker claims next job (worker credential)
 - `POST /task/result` — worker posts result → backend callback
 - `POST /task/error` — worker reports failure → backend callback
-- `DELETE /queue/clear` — backend clears queues (API key)
+- `DELETE /queue/clear` — backend clears queues (API key); scoped only — `book_id`, `dispatch_id` or `workspace_id` is required, without one → `400 scope_required` (the full clear is removed)
 - `GET /worker-source` — deprecated legacy `worker.cjs` (backward compat)
 - `GET /worker-bundle`, `GET /worker-bundle/sha256` — worker runtime bundle
 - `GET /workflow/:id` — baseline workflow by allowlisted id
 - `GET /installer`, `GET /installer/bundle`, `GET /installer/sha256` — private worker onboarding installer
 - `GET /health` — queue depths
+
+Protocol 3 relay (ORCHESTRATION_V2 §8, no task state in the hub):
+
+- `GET /v3/task/next?type=…` — worker credential → `POST {BACKEND_INTERNAL_URL}/internal/gen/claim {worker_id, worker_type}` (x-api-key); the backend answer is returned as is (`{task}` / `{task:null}`). Relay timeout 10 s, no retries; backend unreachable → `503 backend_unavailable`; backend rejects the hub key → `502`.
+- `POST /v3/beacon` — worker credential → `POST /internal/gen/beacon {worker_id, current_job_id}` → `{cancel:[…]}`. The hub also refreshes its own heartbeat key (UI / legacy counts), nothing else.
+
+On the v3 path the hub writes nothing to Redis except that heartbeat key. Results (`PUT upload_url`) and errors (`POST error_url`) go from the worker straight to the backend.
 
 Additions/removals are guarded by tests (route freeze).
 

@@ -16,6 +16,9 @@ const app = buildHubApp({
     // shipped container. Empty/absent env stays absent (defaults apply).
     ...artifactDirEnvConfig(),
     BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
+    // Protocol 3 relay target (ORCHESTRATION_V2 §8): the backend inside the docker
+    // network, e.g. http://animastor-backend:3000. Unset → /v3/* answer 503.
+    BACKEND_INTERNAL_URL: process.env.BACKEND_INTERNAL_URL || null,
     GPU_TIMEOUT_MS: Number(process.env.GPU_TIMEOUT_MS ?? process.env.GPU_TIMEOUT ?? 600000),
     GPU_HUB_API_KEY: process.env.GPU_HUB_API_KEY || null,
     // Canonical public origin embedded into the /installer bootstrap scripts.
