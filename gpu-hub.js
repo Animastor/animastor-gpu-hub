@@ -1,5 +1,6 @@
 // ======================================================
 // GPU HUB - v0.2.0 (Fail-closed worker authorization — PW-4)
+// + protocol 3 relay /v3/* (ORCHESTRATION_V2 stage 1c); /queue/clear scoped only
 // ======================================================
 // Workspace-aware job ownership, FAIL CLOSED:
 //   - worker identity comes ONLY from a Bearer credential resolved via the
@@ -2052,6 +2053,14 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   app.delete("/queue/clear", requireApiKey, async (req, res) => {
     try {
       const { book_id, dispatch_id, workspace_id } = req.query
+      // ORCHESTRATION_V2 §3 I7 / §8.4 (stage 1c): the parameterless FULL
+      // clear (every queue, running, processing, result:*, job:* of every
+      // user) is removed. Clearing is scoped only — book_id, dispatch_id or
+      // workspace_id (a concrete workspace queue). Empty values count as
+      // absent (`?book_id=` used to fall through to the full clear).
+      if (!book_id && !dispatch_id && !workspace_id) {
+        return res.status(400).json({ error: "scope_required", message: "DELETE /queue/clear needs book_id, dispatch_id or workspace_id — the full clear is removed" })
+      }
       // PW-2: workspace-scoped clear — when workspace_id is given, only that
       // workspace's queues/running entries are touched (guest purge seam).
       const queueKeys = await discoverQueueKeys();
@@ -2154,48 +2163,124 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
         console.log(`[QUEUE-CLEAR] Filtered cleanup`, { book_id, dispatch_id, workspace_id, summary })
         res.json({ ok: true, scope: { book_id: book_id || null, dispatch_id: dispatch_id || null, workspace_id: workspace_id || null }, removed: summary })
 
-      } else {
-        // === FULL CLEAR: wipe all queues ===
-
-        for (const key of queueKeys) {
-          const len = await redis.llen(key) || 0
-          await redis.del(key)
-          summary.queued += len
-        }
-
-        // Clear animastor:running
-        const runningLen = await redis.hlen('animastor:running') || 0
-        await redis.del('animastor:running')
-        summary.running += runningLen
-
-        const processingLen = await redis.llen('animastor:processing') || 0
-        await redis.del('animastor:processing')
-        summary.processing += processingLen
-
-        await redis.del(PROCESSING_CLAIMED_KEY).catch(() => {})
-
-        // Clear all result and dedup keys
-        for (const pattern of ['animastor:result:*', 'animastor:job:*']) {
-          let c = '0'
-          do {
-            const scan = await redis.scan(c, 'MATCH', pattern, 'COUNT', 500)
-            c = scan[0]
-            if (scan[1].length) {
-              await redis.del(...scan[1])
-              if (pattern.includes(':result:')) summary.results += scan[1].length
-              else summary.dedup += scan[1].length
-            }
-          } while (c !== '0')
-        }
-
-        console.log(`[QUEUE-CLEAR] Full cleanup`, summary)
-        res.json({ ok: true, message: "All gpu-hub queues cleared", removed: summary })
       }
     } catch (err) {
       console.error("Failed to clear queues:", err.message)
       res.status(500).json({ error: err.message })
     }
   })
+
+  // ======================================================
+  // PROTOCOL 3 — RELAY (ORCHESTRATION_V2 ADR §8, I6)
+  // ======================================================
+  // The hub keeps NO task state on this path: no queue, no running record,
+  // no dedup, no result copy, no retries of its own. It authenticates the
+  // worker (same Bearer gate as v2) and forwards to the backend
+  // (BACKEND_INTERNAL_URL, docker network, x-api-key). Results and errors go
+  // from the worker straight to the backend (upload_url / error_url).
+  //   GET  /v3/task/next?type=…  → POST {backend}/internal/gen/claim  {worker_id, worker_type}
+  //   POST /v3/beacon            → POST {backend}/internal/gen/beacon {worker_id, current_job_id}
+  // The ONLY Redis write of the v3 path: /v3/beacon refreshes the hub's own
+  // heartbeat key (UI status + legacy worker counts) — exactly what /beacon
+  // writes today. Nothing extends liveness from a running record here.
+
+  const V3_RELAY_TIMEOUT_MS = Number(config.V3_RELAY_TIMEOUT_MS) > 0 ? Number(config.V3_RELAY_TIMEOUT_MS) : 10000;
+  const V3_BACKEND = config.BACKEND_INTERNAL_URL ? String(config.BACKEND_INTERNAL_URL).replace(/\/+$/, "") : null;
+
+  function v3Unavailable(res) {
+    if (!V3_BACKEND) {
+      res.status(503).json({ error: "v3_not_configured", message: "BACKEND_INTERNAL_URL is not set on the hub — protocol 3 is unavailable, use /task/next" });
+      return true;
+    }
+    if (!GPU_HUB_API_KEY) {
+      res.status(503).json({ error: "hub_api_key_not_configured", message: "GPU_HUB_API_KEY is required for the backend relay" });
+      return true;
+    }
+    return false;
+  }
+
+  /** One relay hop, no retries. Resolves {status, body, contentType} or throws on network error / timeout. */
+  async function relayToBackend(p, payload) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), V3_RELAY_TIMEOUT_MS);
+    try {
+      const r = await doFetch(`${V3_BACKEND}${p}`, {
+        method: "POST",
+        headers: backendHeaders(),
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const body = await r.text();
+      const contentType = (r.headers && typeof r.headers.get === "function" && r.headers.get("content-type")) || "application/json";
+      return { status: r.status, body, contentType };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Backend answer → worker, as is. A rejected HUB key is the hub's misconfiguration, never the worker's: 502. */
+  function forwardRelay(res, out, what) {
+    if (out.status === 401) {
+      console.error(`[V3] backend rejected the hub key on ${what} (HTTP 401) — check GPU_HUB_API_KEY on hub and backend`);
+      return res.status(502).json({ error: "backend_rejected_hub_key" });
+    }
+    res.status(out.status).type(out.contentType).send(out.body);
+  }
+
+  function relayFailed(res, err, what) {
+    const reason = err && err.name === "AbortError" ? `timeout ${V3_RELAY_TIMEOUT_MS}ms` : String((err && err.message) || err);
+    console.warn(`[V3] ${what} relay failed: ${reason}`);
+    return res.status(503).json({ error: "backend_unavailable", message: `backend ${what} relay failed: ${reason}` });
+  }
+
+  app.get("/v3/task/next", async (req, res) => {
+    const auth = await requireWorkerCredential(redis, req, res);
+    if (!auth) return;
+    if (v3Unavailable(res)) return;
+    const { type } = req.query;
+    if (type && auth.worker_type !== type) {
+      return res.status(409).json({ error: "worker_type_mismatch", registered: auth.worker_type, requested: type });
+    }
+    let out;
+    try {
+      out = await relayToBackend("/internal/gen/claim", { worker_id: auth.worker_id, worker_type: auth.worker_type });
+    } catch (err) {
+      return relayFailed(res, err, "claim");
+    }
+    return forwardRelay(res, out, "claim");
+  });
+
+  app.post("/v3/beacon", async (req, res) => {
+    const auth = await requireWorkerCredential(redis, req, res);
+    if (!auth) return;
+    if (v3Unavailable(res)) return;
+    const { version, image_tag } = req.body || {};
+    const currentJobId = typeof (req.body || {}).current_job_id === "string" && req.body.current_job_id ? req.body.current_job_id : null;
+    // The hub's own heartbeat (UI status, legacy counts) — same key and shape as /beacon.
+    try {
+      const payload = {
+        type: auth.worker_type,
+        worker_id: auth.worker_id,
+        ts: Date.now(),
+        workspace_id: auth.workspace_id || null,
+        mode: auth.mode || null,
+        version: version || null,
+        image_tag: image_tag || null,
+        protocol_version: 3,
+        current_job_id: currentJobId,
+      };
+      const marker = sharePolicyMarker(auth);
+      if (marker) payload.share_policy = marker;
+      await redis.set(`animastor:worker:heartbeat:${auth.worker_type}:${auth.worker_id}`, JSON.stringify(payload), 'EX', 30);
+    } catch (_) {}
+    let out;
+    try {
+      out = await relayToBackend("/internal/gen/beacon", { worker_id: auth.worker_id, current_job_id: currentJobId });
+    } catch (err) {
+      return relayFailed(res, err, "beacon");
+    }
+    return forwardRelay(res, out, "beacon");
+  });
 
   // Expose internals for tests / server.js lifecycle.
   app.__hub = {
@@ -2226,6 +2311,9 @@ if (require.main === module) {
     config: {
       ...artifactDirEnvConfig(),
       BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
+      // Protocol 3 relay target (ORCHESTRATION_V2 §8): the backend inside the docker
+      // network, e.g. http://animastor-backend:3000. Unset → /v3/* answer 503.
+      BACKEND_INTERNAL_URL: process.env.BACKEND_INTERNAL_URL || null,
       GPU_TIMEOUT_MS: Number(process.env.GPU_TIMEOUT_MS ?? process.env.GPU_TIMEOUT ?? 600000),
       GPU_HUB_API_KEY: process.env.GPU_HUB_API_KEY || null,
       GPU_HUB_ALLOW_OPEN: process.env.GPU_HUB_ALLOW_OPEN || null,

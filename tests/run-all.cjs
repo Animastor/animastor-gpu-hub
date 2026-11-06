@@ -16,7 +16,7 @@
  *   3. canonical contracts — protocol consumed from @animastor/contracts,
  *                            no local literal
  *   4. protocol parity     — hub vs worker vs contracts PROTOCOL_VERSION
- *   5. route freeze        — EXACT frozen 14-route HTTP surface
+ *   5. route freeze        — EXACT frozen 16-route HTTP surface (14 v2 + 2 v3 relay)
  *   6. Redis ownership     — hub-owned constants frozen; backend-owned
  *                            animastor:worker-auth never written by the hub
  *   7. artifact resolution — env overrides reach config, live mount beats
@@ -29,7 +29,9 @@
  *                            /task/error forwards the optional error_class /
  *                            comfy_status (tests/task-error-forward.cjs);
  *                            409 detail + stale-dispatch signal, idle
- *                            heartbeat (tests/stale-dispatch-409.cjs)
+ *                            heartbeat (tests/stale-dispatch-409.cjs);
+ *                            protocol 3 relay + scoped-only /queue/clear
+ *                            (tests/v3-relay.cjs)
  */
 
 const fs = require('fs');
@@ -202,13 +204,15 @@ check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', ()
 
 console.log('\n[5/9] route freeze');
 
-check('route surface is EXACTLY the frozen 14-route set (additions and removals both fail)', () => {
+check('route surface is EXACTLY the frozen 16-route set (additions and removals both fail)', () => {
   const FROZEN_ROUTES = [
     'POST /beacon', 'POST /task', 'GET /task/next', 'POST /task/result',
     'POST /task/error', 'GET /worker-source', 'GET /worker-bundle',
     'GET /worker-bundle/sha256', 'GET /workflow/:id', 'GET /installer',
     'GET /installer/bundle', 'GET /installer/sha256', 'GET /health',
     'DELETE /queue/clear',
+    // protocol 3 relay (ORCHESTRATION_V2 §8) — stateless, backend-forwarding
+    'GET /v3/task/next', 'POST /v3/beacon',
   ].sort();
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
   const found = [...src.matchAll(/app\.(post|get|delete|put)\(\s*"([^"]+)"/g)]
@@ -464,6 +468,17 @@ check('409 detail + one backend signal for a lost claim; idle /beacon heartbeat 
   const r = spawnSync(process.execPath, [path.join(__dirname, 'stale-dispatch-409.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
   process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
   assert(r.status === 0, `stale-dispatch-409.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
+});
+
+check('protocol 3 relay: next/beacon forwarded, 503 without BACKEND_INTERNAL_URL / backend down, no Redis state; /queue/clear without scope → 400 (tests/v3-relay.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'v3-relay.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  process.stdout.write(String(r.stdout || '').split('\n').filter((l) => !l.startsWith('[ARTIFACTS]')).map((l) => l && `      ${l}`).join('\n'));
+  assert(r.status === 0, `v3-relay.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
+});
+
+check('server.js forwards BACKEND_INTERNAL_URL into the hub config', () => {
+  const src = readSource(path.join(PKG_ROOT, 'server.js'));
+  assert(/BACKEND_INTERNAL_URL:\s*process\.env\.BACKEND_INTERNAL_URL/.test(src), 'server.js must forward BACKEND_INTERNAL_URL');
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
