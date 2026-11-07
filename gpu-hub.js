@@ -187,7 +187,71 @@ async function requireWorkerCredential(redis, req, res) {
   if (!auth) {
     return (res.status(401).json({ error: 'invalid_worker_credential' }), null);
   }
+  // access log (v0.3.3): the token-derived worker id, never the token itself
+  if (res && res.locals) res.locals.hubWorkerId = auth.worker_id || null;
   return auth;
+}
+
+// ======================================================
+// ACCESS LOG (v0.3.3, reports/2026-11-07/orch-v2-image-scene-run.md О3)
+// ======================================================
+// One line per request: method, path (no query string), status, worker_id
+// (token-derived), duration. Never headers, bodies or the query string
+// (tokens / keys / user data). Idle traffic — an EMPTY task poll
+// ({"task":null} from /task/next and /v3/task/next), a 2xx beacon and
+// /health — is not logged one by one but folded into one summary line per
+// interval (default 60 s), so the log shows work, errors and rejections.
+const ACCESS_SUMMARY_MS = 60_000;
+const EMPTY_POLL_BODY = '{"task":null}';
+const IDLE_PATHS = new Set(['/beacon', '/v3/beacon', '/health']);
+
+function createAccessLog({ log = (line) => console.log(line), now = () => Date.now() } = {}) {
+  let idle = new Map();       // "METHOD path status" → count
+  let idleWorkers = new Set();
+  let since = now();
+
+  function middleware(req, res, next) {
+    const start = now();
+    const origSend = res.send;
+    res.send = function sendTap(body) {
+      try {
+        const text = typeof body === 'string' ? body : (Buffer.isBuffer(body) ? body.toString('utf8', 0, 64) : null);
+        if (text !== null && text.trim() === EMPTY_POLL_BODY) res.locals.hubEmptyPoll = true;
+      } catch (_) { /* never breaks the response */ }
+      return origSend.call(this, body);
+    };
+    res.on('finish', () => {
+      try {
+        const p = String(req.path || req.originalUrl || '').split('?')[0];
+        const workerId = (res.locals && res.locals.hubWorkerId) || null;
+        const status = res.statusCode;
+        const isIdle = (res.locals && res.locals.hubEmptyPoll === true && status === 200)
+          || (IDLE_PATHS.has(p) && status >= 200 && status < 300);
+        if (isIdle) {
+          const k = `${req.method} ${p}${res.locals && res.locals.hubEmptyPoll ? ' empty' : ` ${status}`}`;
+          idle.set(k, (idle.get(k) || 0) + 1);
+          if (workerId) idleWorkers.add(workerId);
+          return;
+        }
+        log(`[HTTP] ${req.method} ${p} → ${status} worker=${workerId || '-'} ${Math.max(0, now() - start)}ms`);
+      } catch (_) { /* logging never breaks the hub */ }
+    });
+    next();
+  }
+
+  /** Print (and reset) the idle summary; nothing when there was no idle traffic. */
+  function flush() {
+    const t = now();
+    if (idle.size > 0) {
+      const parts = [...idle.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([k, n]) => `${k} ×${n}`);
+      log(`[HTTP] idle ${Math.round((t - since) / 1000)}s: ${parts.join(', ')} (workers ${idleWorkers.size})`);
+    }
+    idle = new Map();
+    idleWorkers = new Set();
+    since = t;
+  }
+
+  return { middleware, flush };
 }
 
 const WORKSPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -296,6 +360,14 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   }
 
   const app = express()
+  // v0.3.3: access log first, so every route (incl. 401/404) is counted
+  const accessLog = createAccessLog(config.ACCESS_LOG ? { log: config.ACCESS_LOG } : {});
+  app.use(accessLog.middleware);
+  app.locals.flushAccessLog = accessLog.flush;
+  if (intervals) {
+    const t = setInterval(accessLog.flush, Number(config.ACCESS_SUMMARY_MS) > 0 ? Number(config.ACCESS_SUMMARY_MS) : ACCESS_SUMMARY_MS);
+    if (t.unref) t.unref();
+  }
   app.use(cors())
   // /v3/logs carries a gzip body and its own 128 KiB wire limit: its route
   // reads the raw stream itself (registered in the v3 section below), so the
@@ -2472,6 +2544,8 @@ if (require.main === module) {
 
 module.exports = {
   PROTOCOL_VERSION,
+  createAccessLog,
+  ACCESS_SUMMARY_MS,
   WORKER_AUTH_MIRROR_KEY,
   PROCESSING_CLAIMED_KEY,
   DEAD_LETTER_KEY,

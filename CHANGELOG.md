@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Access log (v0.3.3, reports/2026-11-07/orch-v2-image-scene-run.md О3).** One
+  line per request — `[HTTP] <METHOD> <path> → <status> worker=<worker_id|-> <ms>ms`
+  — for `/v3/*` and the legacy paths; the path is printed without the query string,
+  headers and bodies are never printed (no tokens or keys); `worker_id` is
+  token-derived (`requireWorkerCredential`). Idle traffic — an empty task poll
+  (`{"task":null}` from `/task/next` and `/v3/task/next`), a 2xx beacon, `/health` —
+  is folded into one summary line per minute
+  (`[HTTP] idle 60s: GET /v3/task/next empty ×12, POST /v3/beacon 200 ×6 (workers 2)`).
+  `createAccessLog` exported; test `tests/access-log.cjs`.
+
 ### Fixed
 
 - `gpu-hub.js` — `POST /beacon` (protocol 2 tick) and `POST /v3/beacon` share

@@ -472,6 +472,12 @@ check('409 detail + one backend signal for a lost claim; idle /beacon heartbeat 
   assert(r.status === 0, `stale-dispatch-409.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
+check('access log (v0.3.3): method/path/status/worker/ms per request, no secrets; idle polls folded into a summary (tests/access-log.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'access-log.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  if (r.stdout) process.stdout.write(r.stdout.split('\n').map((l) => `      ${l}`).join('\n') + '\n');
+  assert(r.status === 0, `access-log.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
+});
+
 check('protocol 3 relay: next/beacon forwarded, 503 without BACKEND_INTERNAL_URL / backend down, no Redis state; /queue/clear without scope → 400 (tests/v3-relay.cjs)', () => {
   const r = spawnSync(process.execPath, [path.join(__dirname, 'v3-relay.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
   process.stdout.write(String(r.stdout || '').split('\n').filter((l) => !l.startsWith('[ARTIFACTS]')).map((l) => l && `      ${l}`).join('\n'));
