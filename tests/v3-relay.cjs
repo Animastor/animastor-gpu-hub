@@ -21,7 +21,7 @@ const path = require('path');
 const crypto = require('crypto');
 const assert = require('assert');
 
-const { buildHubApp, WORKER_AUTH_MIRROR_KEY } = require(path.join(__dirname, '..', 'gpu-hub.js'));
+const { buildHubApp, WORKER_AUTH_MIRROR_KEY, PROTOCOL_VERSION } = require(path.join(__dirname, '..', 'gpu-hub.js'));
 
 const WORKER_ID = '11111111-2222-4333-8444-555555555555';
 const SECRET = Buffer.from('test-secret-not-real');
@@ -250,6 +250,55 @@ test('/v3/beacon with backend down → 503, heartbeat still refreshed (hub-own l
   assert.strictEqual(w.length, 1);
   assert.ok(w[0].args[0].startsWith('animastor:worker:heartbeat:audio:'));
   assert.strictEqual(JSON.parse(w[0].args[1]).current_job_id, null);
+});
+
+// v2 (/beacon) and v3 (/v3/beacon) share the heartbeat key: the v2 tick must
+// not erase the v3-owned fields (reports/2026-11-06 §10).
+const HB_KEY = `animastor:worker:heartbeat:audio:${WORKER_ID}`;
+
+test('v3 beacon → v2 beacon: protocol_version 3 and current_job_id survive the merge', async () => {
+  const b = backendStub(async () => jsonResponse(200, { cancel: [] }));
+  const s = setup({ fetchImpl: b.fetchImpl });
+  assert.strictEqual((await call(s.app, 'POST', '/v3/beacon', { body: { version: '2.4.0', current_job_id: 'job-x' } })).status, 200);
+  const r = await call(s.app, 'POST', '/beacon', { body: { gpu: 'RTX', vram: '24GB', version: '2.4.0', protocol_version: PROTOCOL_VERSION } });
+  assert.strictEqual(r.status, 200);
+  const w = s.writes().filter((c) => c.args[0] === HB_KEY);
+  assert.strictEqual(w.length, 2, 'one v3 write + one v2 write');
+  assert.strictEqual(w[1].op, 'set');
+  assert.strictEqual(w[1].args[0], HB_KEY);
+  assert.deepStrictEqual(w[1].args.slice(2), ['EX', 30], 'TTL unchanged');
+  const hb = JSON.parse(s.kv.get(HB_KEY));
+  assert.strictEqual(hb.protocol_version, 3, 'v3 protocol tag kept');
+  assert.strictEqual(hb.current_job_id, 'job-x', 'v3 current job kept');
+  assert.strictEqual(hb.worker_id, WORKER_ID);
+  assert.strictEqual(hb.mode, 'private');
+  assert.strictEqual(hb.version, '2.4.0');
+  assert.ok(typeof hb.ts === 'number');
+});
+
+test('v2 beacon alone (old worker) → heartbeat exactly as before', async () => {
+  const s = setup();
+  const r = await call(s.app, 'POST', '/beacon', { body: { gpu: 'V100', vram: '16 GB', version: '2.3.0', protocol_version: PROTOCOL_VERSION } });
+  assert.strictEqual(r.status, 200);
+  const w = s.writes().filter((c) => c.args[0] === HB_KEY);
+  assert.strictEqual(w.length, 1);
+  assert.deepStrictEqual(w[0].args.slice(2), ['EX', 30]);
+  const hb = JSON.parse(s.kv.get(HB_KEY));
+  assert.strictEqual(hb.protocol_version, PROTOCOL_VERSION);
+  assert.ok(!('current_job_id' in hb), 'no current job on a pure v2 heartbeat');
+  assert.strictEqual(hb.worker_id, WORKER_ID);
+  assert.strictEqual(hb.workspace_id, 'ws-1');
+});
+
+test('a v3 record older than the 30 s TTL does not block the v2 write', async () => {
+  const s = setup();
+  await s.redis.set(HB_KEY, JSON.stringify({ type: 'audio', worker_id: WORKER_ID, ts: Date.now() - 31000, protocol_version: 3, current_job_id: 'stale-job' }), 'EX', 30);
+  s.calls.length = 0;
+  const r = await call(s.app, 'POST', '/beacon', { body: { gpu: 'V100', version: '2.3.0', protocol_version: PROTOCOL_VERSION } });
+  assert.strictEqual(r.status, 200);
+  const hb = JSON.parse(s.kv.get(HB_KEY));
+  assert.strictEqual(hb.protocol_version, PROTOCOL_VERSION);
+  assert.ok(!('current_job_id' in hb), 'stale v3 job is not carried over');
 });
 
 test('DELETE /queue/clear without parameters → 400 scope_required, zero Redis calls', async () => {

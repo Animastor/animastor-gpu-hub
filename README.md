@@ -41,7 +41,7 @@ npm test           # zero-dependency suite: package smoke, import isolation,
 
 Frozen route set (16 routes — see `docs/architecture/GPU_HUB_CONTRACT.md` §3):
 
-- `POST /beacon` — worker heartbeat
+- `POST /beacon` — worker heartbeat. Both beacon flavours share the key `animastor:worker:heartbeat:{type}:{id}` (EX 30): when a v3 record younger than the TTL is already there, the v2 write keeps its `protocol_version: 3` and `current_job_id` instead of overwriting the whole record (see the v3 beacon below).
 - `POST /task` — backend submits a GPU job (API key)
 - `GET /task/next` — worker claims next job (worker credential)
 - `POST /task/result` — worker posts result → backend callback
@@ -56,7 +56,7 @@ Frozen route set (16 routes — see `docs/architecture/GPU_HUB_CONTRACT.md` §3)
 Protocol 3 relay (ORCHESTRATION_V2 §8, no task state in the hub):
 
 - `GET /v3/task/next?type=…` — worker credential → `POST {BACKEND_INTERNAL_URL}/internal/gen/claim {worker_id, worker_type}` (x-api-key); the backend answer is returned as is (`{task}` / `{task:null}`). Relay timeout 10 s, no retries; backend unreachable → `503 backend_unavailable`; backend rejects the hub key → `502`.
-- `POST /v3/beacon` — worker credential → `POST /internal/gen/beacon {worker_id, current_job_id}` → `{cancel:[…]}`. The hub also refreshes its own heartbeat key (UI / legacy counts), nothing else.
+- `POST /v3/beacon` — worker credential → `POST /internal/gen/beacon {worker_id, current_job_id}` → `{cancel:[…]}`. The hub also refreshes its own heartbeat key (UI / legacy counts), nothing else. That record owns `protocol_version: 3` + `current_job_id`; a v2 `/beacon` tick on the same key merges them instead of dropping them.
 
 On the v3 path the hub writes nothing to Redis except that heartbeat key. Results (`PUT upload_url`) and errors (`POST error_url`) go from the worker straight to the backend.
 

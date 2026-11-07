@@ -16,7 +16,7 @@
  *   3. canonical contracts — protocol consumed from @animastor/contracts,
  *                            no local literal
  *   4. protocol parity     — hub vs worker vs contracts PROTOCOL_VERSION
- *   5. route freeze        — EXACT frozen 16-route HTTP surface (14 v2 + 2 v3 relay)
+ *   5. route freeze        — EXACT frozen 17-route HTTP surface (14 v2 + 3 v3)
  *   6. Redis ownership     — hub-owned constants frozen; backend-owned
  *                            animastor:worker-auth never written by the hub
  *   7. artifact resolution — env overrides reach config, live mount beats
@@ -204,7 +204,7 @@ check('hub PROTOCOL_VERSION equals the canonical @animastor/contracts value', ()
 
 console.log('\n[5/9] route freeze');
 
-check('route surface is EXACTLY the frozen 16-route set (additions and removals both fail)', () => {
+check('route surface is EXACTLY the frozen 17-route set (additions and removals both fail)', () => {
   const FROZEN_ROUTES = [
     'POST /beacon', 'POST /task', 'GET /task/next', 'POST /task/result',
     'POST /task/error', 'GET /worker-source', 'GET /worker-bundle',
@@ -213,6 +213,8 @@ check('route surface is EXACTLY the frozen 16-route set (additions and removals 
     'DELETE /queue/clear',
     // protocol 3 relay (ORCHESTRATION_V2 §8) — stateless, backend-forwarding
     'GET /v3/task/next', 'POST /v3/beacon',
+    // fresh worker logs (§8.5) — stateless, backend-forwarding
+    'POST /v3/logs',
   ].sort();
   const src = readSource(path.join(PKG_ROOT, 'gpu-hub.js'));
   const found = [...src.matchAll(/app\.(post|get|delete|put)\(\s*"([^"]+)"/g)]
@@ -479,6 +481,12 @@ check('protocol 3 relay: next/beacon forwarded, 503 without BACKEND_INTERNAL_URL
 check('server.js forwards BACKEND_INTERNAL_URL into the hub config', () => {
   const src = readSource(path.join(PKG_ROOT, 'server.js'));
   assert(/BACKEND_INTERNAL_URL:\s*process\.env\.BACKEND_INTERNAL_URL/.test(src), 'server.js must forward BACKEND_INTERNAL_URL');
+});
+
+check('fresh worker logs: /v3/logs auth, forward, 413, no Redis writes (tests/v3-logs.cjs)', () => {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'v3-logs.cjs')], { encoding: 'utf8', timeout: 60000, env: process.env });
+  process.stdout.write(String(r.stdout || '').split('\n').map((l) => l && `      ${l}`).join('\n'));
+  assert(r.status === 0, `v3-logs.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────
