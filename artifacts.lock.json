@@ -10,7 +10,7 @@
     "backend": {
       "repository": "Animastor/animastor-backend",
       "url": "https://github.com/Animastor/animastor-backend",
-      "commit": "49b679d0ca0b5c7373ba3324ddb094605486c277"
+      "commit": "c8fb5c0c268f17801e107b106e804f209142f8f1"
     }
   },
   "artifacts": {
@@ -25,21 +25,21 @@
       "source": "backend",
       "path": "backend/ai/workflows",
       "files": 9,
-      "sha256_tree": "0d51107d58f9774fb761fca7319bdeb637b02a18c0f8f92dfec713c97beca738",
+      "sha256_tree": "d176b3706de0aa88b88263583fa9fba1f8c03538caadb37e2a7c66b9e59d2e0d",
       "version": null
     },
     "installer-src": {
       "source": "backend",
       "path": "packages/animastor-installer/src/installer",
       "files": 39,
-      "sha256_tree": "60459c00698d0a0b389a5374893294eccd09a072e34c569130ae0c6d5aae7950",
-      "version": "0.2.8"
+      "sha256_tree": "01343b49630ca76f78ef2f58d8c36640e606dbb1f1efb252ad42d5d07e3c7e57",
+      "version": "0.2.9"
     },
     "install-manifests": {
       "source": "backend",
       "path": "packages/animastor-installer/ai/install-manifests",
       "files": 3,
-      "sha256_tree": "afbc3371fa54ee5b2df9f526835c186c3b2e9dd1883d20efed29209904d51c4a",
+      "sha256_tree": "66bc527b3644ad79063a771f4be7888edbab0fa7e09f0a96dfbf4f7ac2df7245",
       "version": null
     }
   }
