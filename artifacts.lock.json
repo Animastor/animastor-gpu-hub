@@ -5,12 +5,12 @@
     "worker": {
       "repository": "Animastor/animastor-worker",
       "url": "https://github.com/Animastor/animastor-worker",
-      "commit": "c7c43b5e0eb448d181d2acedecacc562cd41c538"
+      "commit": "68a518156a697e526ba509fa6214df148d234cc3"
     },
     "backend": {
       "repository": "Animastor/animastor-backend",
       "url": "https://github.com/Animastor/animastor-backend",
-      "commit": "8cb3b468972f25fc905179379a763212474313a0"
+      "commit": "a406d61c0145ec6915e1b9be896588dae7f2a70a"
     }
   },
   "artifacts": {
@@ -18,8 +18,8 @@
       "source": "worker",
       "path": "packages/animastor-worker/worker",
       "files": 9,
-      "sha256_tree": "6a3b87d150c8a9547bfe601858a24f4769f49ba9e39d40267655a6e59a9333c1",
-      "version": "2.4.1"
+      "sha256_tree": "c8f5cb632a7ab6c611d1c922467c0c73b2540a5fb23834638e1fd060ed62fe52",
+      "version": "2.5.0"
     },
     "workflows": {
       "source": "backend",
