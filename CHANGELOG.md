@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed (v0.3.5, VBook v4 release — artifacts repin)
+
+- `artifacts.lock.json`: worker `8745ca9` (main, merge of `feat/voice-references`;
+  bundle 2.5.0, 9 files — only the result-contract comment in `worker.cjs` changed),
+  backend `045328c` (main, merge of `feat/vbook-v4`): installer-src **0.2.11**,
+  workflows 11 files (voice-reference + transcribe), install-manifests with
+  `custom-node:animastor-voice-ref` (`SaveAudioAnimastorReference`, worker `6a88ad9`).
+
 ### Changed (v0.3.5, VBook v4 release — owner decision, step 6 Q2)
 
 - **No default infra hosts.** `REDIS_URL` and `BACKEND_URL` are required; the
