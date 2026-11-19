@@ -60,6 +60,7 @@ jobs:
           docker run -d --name hub-ci \
             --network hub-ci \
             -e REDIS_URL=redis://hub-ci-redis:6379 \
+            -e BACKEND_URL=http://hub-ci-backend.invalid:3000 \
             -e GPU_HUB_API_KEY=ci-test-key \
             gpu-hub-ci:${{ github.sha }} >/dev/null
           sleep 3

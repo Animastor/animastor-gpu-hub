@@ -26,8 +26,8 @@ npm test           # zero-dependency suite: package smoke, import isolation,
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `5000` | HTTP listen port |
-| `REDIS_URL` | `redis://animastor-redis:6379` | Redis connection |
-| `BACKEND_URL` | `http://animastor-backend:3000` | Backend base URL for result/error callbacks |
+| `REDIS_URL` | — **required** | Redis connection. Unset → one `[FATAL]` line, exit 1 (no default host since v0.3.5) |
+| `BACKEND_URL` | — **required** | Backend base URL for result/error callbacks. Unset → `[FATAL]`, exit 1 (no default host since v0.3.5) |
 | `BACKEND_INTERNAL_URL` | — (empty) | Protocol 3 relay target inside the docker network (e.g. `http://animastor-backend:3000`). Empty → `/v3/*` answer `503 v3_not_configured` |
 | `GPU_HUB_API_KEY` | — (empty) | Shared API key for backend → hub calls (`/task`, `/queue/clear`). Empty = no auth (dev only) |
 | `GPU_TIMEOUT_MS` / `GPU_TIMEOUT` | `600000` | GPU task hard timeout (ms) |

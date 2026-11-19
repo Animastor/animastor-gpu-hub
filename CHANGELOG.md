@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Changed (v0.3.5, VBook v4 release — artifacts repin)
+
+- `artifacts.lock.json`: worker `8745ca9` (main, merge of `feat/voice-references`;
+  bundle 2.5.0, 9 files — only the result-contract comment in `worker.cjs` changed),
+  backend `045328c` (main, merge of `feat/vbook-v4`): installer-src **0.2.11**,
+  workflows 11 files (voice-reference + transcribe), install-manifests with
+  `custom-node:animastor-voice-ref` (`SaveAudioAnimastorReference`, worker `6a88ad9`).
+
+### Changed (v0.3.5, VBook v4 release — owner decision, step 6 Q2)
+
+- **No default infra hosts.** `REDIS_URL` and `BACKEND_URL` are required; the
+  `redis://animastor-redis:6379` / `http://animastor-backend:3000` fallbacks are
+  gone from `server.js` and the standalone start of `gpu-hub.js`. A missing value
+  prints one line `[FATAL] REDIS_URL is not set; BACKEND_URL is not set — …` and
+  exits 1 before Redis is touched (`requiredInfraEnv` / `requireInfraEnvOrExit`).
+  Reason: on a host with a wildcard DNS search domain a short docker name of an
+  absent container resolves to a stranger's machine and would receive the Redis
+  password / task callbacks. Deploy must set `BACKEND_URL` explicitly (prod
+  compose relied on the default). CI smokes pass `BACKEND_URL`. Tests:
+  `tests/run-all.cjs` — 5 checks (no literal fallbacks, FATAL for both entry
+  points, partial env, helper).
+
 ### Added
 
 - **Access log (v0.3.3, reports/2026-11-07/orch-v2-image-scene-run.md О3).** One

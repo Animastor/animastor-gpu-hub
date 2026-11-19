@@ -1,9 +1,11 @@
 // GPU Hub entrypoint. gpu-hub.js exports a testable buildHubApp factory;
 // this file wires the real Redis client + env config and starts the server.
-const { buildHubApp, artifactDirEnvConfig } = require('./gpu-hub');
+const { buildHubApp, artifactDirEnvConfig, requireInfraEnvOrExit } = require('./gpu-hub');
 
-const REDIS_URL = process.env.REDIS_URL || "redis://animastor-redis:6379";
-const redis = new (require("ioredis"))(REDIS_URL);
+// REDIS_URL and BACKEND_URL have no defaults: a missing one is a one-line
+// [FATAL] and exit 1 before Redis is touched (see requiredInfraEnv).
+const infra = requireInfraEnvOrExit();
+const redis = new (require("ioredis"))(infra.REDIS_URL);
 const { PORT = 5000 } = process.env;
 
 const app = buildHubApp({
@@ -15,7 +17,7 @@ const app = buildHubApp({
     // config-override branch of resolveArtifactDir() was dead code in a
     // shipped container. Empty/absent env stays absent (defaults apply).
     ...artifactDirEnvConfig(),
-    BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
+    BACKEND_URL: infra.BACKEND_URL,
     // Protocol 3 relay target (ORCHESTRATION_V2 §8): the backend inside the docker
     // network, e.g. http://animastor-backend:3000. Unset → /v3/* answer 503.
     BACKEND_INTERNAL_URL: process.env.BACKEND_INTERNAL_URL || null,
