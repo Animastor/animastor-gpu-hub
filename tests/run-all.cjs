@@ -495,6 +495,49 @@ check('fresh worker logs: /v3/logs auth, forward, 413, no Redis writes (tests/v3
   assert(r.status === 0, `v3-logs.cjs exit ${r.status}: ${String(r.stderr || '').slice(0, 400)}`);
 });
 
+// ── infra env: no default hosts (VBook v4 step 6, owner Q2) ──────────────
+
+check('runtime files carry no default infra host (animastor-redis / animastor-backend fallbacks)', () => {
+  for (const file of ['gpu-hub.js', 'server.js']) {
+    const src = readSource(path.join(PKG_ROOT, file));
+    assert(!/\|\|\s*["']redis:\/\//.test(src), `${file}: REDIS_URL must not fall back to a literal`);
+    assert(!/BACKEND_URL\s*(\|\||=)\s*["']http/.test(src), `${file}: BACKEND_URL must not default to a literal`);
+  }
+});
+
+function startWithoutEnv(entry, extraEnv) {
+  const env = { ...process.env };
+  delete env.REDIS_URL;
+  delete env.BACKEND_URL;
+  return spawnSync(process.execPath, [path.join(PKG_ROOT, entry)], {
+    encoding: 'utf8', timeout: 15000, env: { ...env, PORT: '0', ...extraEnv },
+  });
+}
+
+for (const entry of ['server.js', 'gpu-hub.js']) {
+  check(`${entry} without REDIS_URL / BACKEND_URL → one [FATAL] line, exit 1, no connection`, () => {
+    const r = startWithoutEnv(entry, {});
+    assert(r.status === 1, `exit ${r.status}, signal ${r.signal}`);
+    const fatal = String(r.stderr).split('\n').filter((l) => l.includes('[FATAL]'));
+    assert(fatal.length === 1, `expected one [FATAL] line, got: ${r.stderr}`);
+    assert(/REDIS_URL is not set/.test(fatal[0]) && /BACKEND_URL is not set/.test(fatal[0]), fatal[0]);
+    assert(!/GPU HUB running/.test(String(r.stdout)), 'hub must not listen');
+  });
+}
+
+check('server.js with only REDIS_URL → [FATAL] names BACKEND_URL only', () => {
+  const r = startWithoutEnv('server.js', { REDIS_URL: 'redis://127.0.0.1:1' });
+  assert(r.status === 1, `exit ${r.status}`);
+  assert(/\[FATAL\] BACKEND_URL is not set/.test(r.stderr) && !/REDIS_URL is not set/.test(r.stderr), r.stderr);
+});
+
+check('requiredInfraEnv: both set → ok, values trimmed', () => {
+  const { requiredInfraEnv } = require(path.join(PKG_ROOT, 'gpu-hub.js'));
+  const r = requiredInfraEnv({ REDIS_URL: ' redis://r:6379 ', BACKEND_URL: 'http://b:3000' });
+  assert(r.ok && r.REDIS_URL === 'redis://r:6379' && r.BACKEND_URL === 'http://b:3000', JSON.stringify(r));
+  assert(!requiredInfraEnv({ REDIS_URL: '  ', BACKEND_URL: 'x' }).ok, 'blank REDIS_URL must fail');
+});
+
 // ── summary ──────────────────────────────────────────────────────────────
 
 console.log(`\n========================================`);

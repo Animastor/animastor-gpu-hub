@@ -273,6 +273,30 @@ const ARTIFACT_DIR_ENV_KEYS = [
   "INSTALLER_PKG_DIR",
 ];
 
+// Infra endpoints have NO defaults (owner decision, VBook v4 step 6 Q2): a short
+// docker name like `animastor-redis` / `animastor-backend` falls through to the
+// host's DNS search domain (wildcard) when the container is absent, and the hub
+// would then send the Redis password / callbacks to a stranger. A missing value
+// is a FATAL start error, printed in one line before any connection is opened.
+const REQUIRED_INFRA_ENV_KEYS = ["REDIS_URL", "BACKEND_URL"];
+
+function requiredInfraEnv(env = process.env) {
+  const missing = REQUIRED_INFRA_ENV_KEYS.filter((k) => !(typeof env[k] === "string" && env[k].trim()));
+  if (missing.length) {
+    return { ok: false, missing, message: `[FATAL] ${missing.map((k) => `${k} is not set`).join("; ")} — the hub has no default infra hosts; set them in the compose environment` };
+  }
+  return { ok: true, REDIS_URL: env.REDIS_URL.trim(), BACKEND_URL: env.BACKEND_URL.trim() };
+}
+
+function requireInfraEnvOrExit(env = process.env) {
+  const r = requiredInfraEnv(env);
+  if (!r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
+  return r;
+}
+
 function artifactDirEnvConfig(env = process.env) {
   const out = {};
   for (const key of ARTIFACT_DIR_ENV_KEYS) {
@@ -290,7 +314,8 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
   if (!redis) throw new Error('buildHubApp: redis is required');
 
   const {
-    BACKEND_URL = "http://animastor-backend:3000",
+    // No default: server.js / standalone start require BACKEND_URL (requiredInfraEnv).
+    BACKEND_URL = null,
     // 10 min — image ~1-2min, audio ~30s, video (LTX) ~5-10min.
     // ИНВАРИАНТ: GPU_TIMEOUT_MS должен быть МЕНЬШЕ STALL_FAILSAFE_MS backend'а
     // (backend/src/config/runtime-config.js, формула GPU_TIMEOUT_MS * 3).
@@ -2503,15 +2528,15 @@ function buildHubApp({ redis, config = {}, fetchImpl, intervals = true } = {}) {
 // ======================================================
 
 if (require.main === module) {
-  const REDIS_URL = process.env.REDIS_URL || "redis://animastor-redis:6379";
-  const redis = new (require("ioredis"))(REDIS_URL);
+  const infra = requireInfraEnvOrExit();
+  const redis = new (require("ioredis"))(infra.REDIS_URL);
   const { PORT = 5000 } = process.env;
 
   const app = buildHubApp({
     redis,
     config: {
       ...artifactDirEnvConfig(),
-      BACKEND_URL: process.env.BACKEND_URL || "http://animastor-backend:3000",
+      BACKEND_URL: infra.BACKEND_URL,
       // Protocol 3 relay target (ORCHESTRATION_V2 §8): the backend inside the docker
       // network, e.g. http://animastor-backend:3000. Unset → /v3/* answer 503.
       BACKEND_INTERNAL_URL: process.env.BACKEND_INTERNAL_URL || null,
@@ -2558,6 +2583,10 @@ module.exports = {
   buildHubApp,
   // Artifact dir env forwarding (server.js config seam)
   artifactDirEnvConfig,
+  // Required infra env, no defaults (server.js start gate)
+  REQUIRED_INFRA_ENV_KEYS,
+  requiredInfraEnv,
+  requireInfraEnvOrExit,
   // SH-1 test/ops surface (worker sharing V1)
   sanitizeSharePolicy,
   activeSharePolicy,

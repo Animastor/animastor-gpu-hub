@@ -85,7 +85,7 @@ services:
 | Seam | Contract |
 |---|---|
 | Internal DNS | `http://gpu-hub:5000` on the compose network; nginx routes `/gpu/` → hub `:5000` (public path = same path under `/gpu/`) |
-| Env vars | `PORT`, `REDIS_URL`, `BACKEND_URL`, `GPU_HUB_API_KEY`, `GPU_HUB_ALLOW_OPEN` (dev-only), `GPU_TIMEOUT_MS`/`GPU_TIMEOUT`, `SHARE_FEATURES_ENABLED`, `ORPHAN_GRACE_MS`, `MAX_ORPHAN_REQUEUES`, artifact dir overrides (`WORKER_BUNDLE_DIR`, `WORKFLOW_DIR`, `INSTALLER_SRC_DIR`, `INSTALLER_MANIFESTS_DIR`, `INSTALLER_WORKFLOWS_DIR`, `INSTALLER_PKG_DIR`) |
+| Env vars | `PORT`, `REDIS_URL` (required), `BACKEND_URL` (required), `GPU_HUB_API_KEY`, `GPU_HUB_ALLOW_OPEN` (dev-only), `GPU_TIMEOUT_MS`/`GPU_TIMEOUT`, `SHARE_FEATURES_ENABLED`, `ORPHAN_GRACE_MS`, `MAX_ORPHAN_REQUEUES`, artifact dir overrides (`WORKER_BUNDLE_DIR`, `WORKFLOW_DIR`, `INSTALLER_SRC_DIR`, `INSTALLER_MANIFESTS_DIR`, `INSTALLER_WORKFLOWS_DIR`, `INSTALLER_PKG_DIR`) |
 | Redis | single `REDIS_URL` instance; hub-owned key families (`animastor:gpu-hub:workers`, queue/running/heartbeat/dead-letter); reads (never writes) the backend-owned `animastor:worker-auth` mirror |
 | Backend callbacks | `POST ${BACKEND_URL}/gpu/task/result` and `/gpu/task/error` (Job Protocol v2 envelopes, 5 retries × 500 ms, error fallback key TTL 1 h) |
 | Public exposure | never expose the hub directly to the internet; always behind the authenticated nginx `/gpu/` prefix + `GPU_HUB_API_KEY` |

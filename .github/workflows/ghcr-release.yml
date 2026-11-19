@@ -191,6 +191,7 @@ jobs:
           docker run -d --name ghcr-smoke-hub \
             --network ghcr-smoke \
             -e REDIS_URL=redis://ghcr-smoke-redis:6379 \
+            -e BACKEND_URL=http://ghcr-smoke-backend.invalid:3000 \
             -e GPU_HUB_API_KEY=release-test-key \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} >/dev/null
           sleep 3
