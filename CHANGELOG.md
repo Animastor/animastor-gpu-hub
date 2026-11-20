@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed (release workflow — existing image_tag is refused)
+
+- `ghcr-release.yml` fails when `image_tag` already exists in GHCR, before the
+  build and again right before `docker push` (race with a parallel run).
+  `.github/scripts/ghcr-tag-absent.sh`: manifest HEAD via the registry token
+  endpoint; `404` → continue, `200` → fail, anything else / no credentials /
+  timeout → fail (fail closed). Credentials go to curl through `-K -` (stdin),
+  never argv. Tests: `tests/run-all.cjs` — 5 checks with a stub `curl`
+  (404/200/401/403/500/000, token failure, no creds, no secret in argv/output,
+  guard placement in the workflow). Reason: owner request after the v0.3.5
+  release (a re-run on a taken tag would silently move it to another digest).
+
 ### Changed (v0.3.5, VBook v4 release — artifacts repin)
 
 - `artifacts.lock.json`: worker `8745ca9` (main, merge of `feat/voice-references`;
