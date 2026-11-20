@@ -538,6 +538,80 @@ check('requiredInfraEnv: both set → ok, values trimmed', () => {
   assert(!requiredInfraEnv({ REDIS_URL: '  ', BACKEND_URL: 'x' }).ok, 'blank REDIS_URL must fail');
 });
 
+// ── release workflow: an existing image_tag is refused ───────────────────
+// .github/scripts/ghcr-tag-absent.sh runs against a stub `curl` on PATH, so
+// no registry is touched. Contract: 404 → 0 (free), 200 → 1 (exists),
+// anything else / no credentials / token failure → 2 (fail closed).
+
+const TAG_GUARD = path.join(PKG_ROOT, '.github', 'scripts', 'ghcr-tag-absent.sh');
+
+function runTagGuard({ manifestCode = '404', tokenFails = false, creds = true } = {}) {
+  const { spawnSync } = require('child_process');
+  const os = require('os');
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'tag-guard-'));
+  const argLog = path.join(bin, 'args.log');
+  fs.writeFileSync(path.join(bin, 'curl'), [
+    '#!/usr/bin/env bash',
+    'printf "%s\\n" "$*" >> "$ARG_LOG"',
+    'cat > /dev/null',
+    'case "$*" in',
+    '  */token\\?*) [ "$FAKE_TOKEN_FAIL" = 1 ] && exit 22; printf \'{"token":"stub-bearer"}\' ;;',
+    '  */manifests/*) printf "%s" "$FAKE_CODE" ;;',
+    'esac',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  const env = {
+    PATH: `${bin}:${process.env.PATH}`, ARG_LOG: argLog,
+    FAKE_CODE: manifestCode, FAKE_TOKEN_FAIL: tokenFails ? '1' : '0',
+  };
+  if (creds) { env.GHCR_USER = 'release-bot'; env.GHCR_TOKEN = 'secret-pat-value'; }
+  const r = spawnSync('bash', [TAG_GUARD, 'ghcr.io', 'animastor/animastor-gpu-hub', 'v9.9.9'], { env, encoding: 'utf8' });
+  const args = fs.existsSync(argLog) ? fs.readFileSync(argLog, 'utf8') : '';
+  fs.rmSync(bin, { recursive: true, force: true });
+  return { status: r.status, out: `${r.stdout}${r.stderr}`, args };
+}
+
+check('ghcr-tag-absent: manifest 404 → exit 0 (tag free)', () => {
+  const r = runTagGuard({ manifestCode: '404' });
+  assert(r.status === 0, `exit ${r.status}: ${r.out}`);
+});
+
+check('ghcr-tag-absent: manifest 200 → exit 1 (tag exists, release refused)', () => {
+  const r = runTagGuard({ manifestCode: '200' });
+  assert(r.status === 1 && /ALREADY EXISTS/.test(r.out), `exit ${r.status}: ${r.out}`);
+});
+
+check('ghcr-tag-absent: fails closed (401 / 500 / token error / no creds → exit 2)', () => {
+  for (const code of ['401', '403', '500', '000']) {
+    const r = runTagGuard({ manifestCode: code });
+    assert(r.status === 2, `HTTP ${code}: exit ${r.status}: ${r.out}`);
+  }
+  const t = runTagGuard({ tokenFails: true });
+  assert(t.status === 2, `token failure: exit ${t.status}: ${t.out}`);
+  const n = runTagGuard({ creds: false });
+  assert(n.status === 2 && n.args === '', `no creds: exit ${n.status}, curl called: ${JSON.stringify(n.args)}`);
+});
+
+check('ghcr-tag-absent: credentials and bearer never on the curl command line', () => {
+  const r = runTagGuard({ manifestCode: '404' });
+  assert(r.args.includes('/token?') && r.args.includes('/manifests/v9.9.9'), `curl calls: ${r.args}`);
+  assert(!/secret-pat-value|release-bot|stub-bearer/.test(r.args), `secret leaked into argv: ${r.args}`);
+  assert(!/secret-pat-value|stub-bearer/.test(r.out), `secret leaked into output: ${r.out}`);
+});
+
+check('ghcr-release.yml: tag guard runs before the build and again in the push step', () => {
+  const wf = fs.readFileSync(path.join(PKG_ROOT, '.github', 'workflows', 'ghcr-release.yml'), 'utf8');
+  const guard = 'bash .github/scripts/ghcr-tag-absent.sh';
+  const first = wf.indexOf(guard);
+  const build = wf.indexOf('- name: Build image');
+  const push = wf.indexOf('- name: Push to GHCR');
+  const pushCmd = wf.indexOf('docker push', push);
+  assert(first > 0 && first < build, 'guard must run before Build image');
+  const second = wf.indexOf(guard, first + 1);
+  assert(second > push && second < pushCmd, 'guard must re-run inside Push to GHCR before docker push');
+  assert(!/GHCR_IMAGE_PAT \}\}"?\s*\|\s*curl|curl[^\n]*GHCR_IMAGE_PAT/.test(wf), 'PAT must not be inlined into curl');
+});
+
 // ── summary ──────────────────────────────────────────────────────────────
 
 console.log(`\n========================================`);

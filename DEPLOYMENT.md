@@ -113,6 +113,15 @@ stale or missing artifact can never be baked in silently → reproducible
 the locked versions/bytes → push → the immutable digest **and** the content
 digest (`scripts/content-hash.cjs`, `<files> <sha256>` of `/app`) are recorded.
 
+**Release tags are immutable.** The workflow refuses an `image_tag` that
+already exists in GHCR: `.github/scripts/ghcr-tag-absent.sh` HEADs the
+manifest right after checkout (before anything is built) and again inside the
+push step (another run may have taken the tag meanwhile). Only a clean `404`
+lets the run continue; `200` fails with "ALREADY EXISTS — choose a new
+image_tag", and any token/registry error, missing credentials or timeout
+also fails (fail closed). Re-releasing a commit therefore always takes a new
+tag (e.g. `v0.3.5` → `v0.3.6`); an existing tag is never moved.
+
 `artifacts/` and `_sources/` are staging-only and gitignored: the pins plus
 verification are the contract, not the bytes. Bumping a pin is a reviewed
 commit produced by
